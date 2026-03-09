@@ -67,8 +67,12 @@ def main():
     else:
         model_path = snapshot_download(model_source)
 
+    # Derive torchtitan flavor from HF model name (e.g. "Qwen/Qwen3-1.7B" -> "1.7B")
+    _FLAVOR_MAP = {"Qwen/Qwen3-0.6B": "0.6B", "Qwen/Qwen3-1.7B": "1.7B", "Qwen/Qwen3-4B": "4B", "Qwen/Qwen3-8B": "8B"}
+    flavor = _FLAVOR_MAP.get(args.model, "0.6B")
+
     config = EmbeddingTrainer.Config(
-        model_spec=model_registry("0.6B"),
+        model_spec=model_registry(flavor),
         hf_assets_path=model_path,
         dump_folder=args.output_dir,
         embedding=EmbeddingConfig(

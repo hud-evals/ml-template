@@ -8,8 +8,7 @@ dist/*
 .vscode
 .vs
 
-# data
-data
+# workspace
 workspace
 workspace_gpu*
 out
