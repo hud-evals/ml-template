@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+
+FROM nvidia/cuda:12.4.1-runtime-ubuntu24.04 AS setup
+
+RUN apt-get update -y \
+  && apt-get install -y --no-install-recommends \
+  bash \
+  build-essential \
+  ca-certificates \
+  curl \
+  git \
+  python-is-python3 \
+  python3 \
+  python3-dev \
+  python3-pip \
+  python3-venv \
+  python3-wheel \
+  sudo \
+  vim \
+  wget \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN update-ca-certificates
+
+# Agent user
+USER ubuntu
+ENV HOME=/home/ubuntu
+RUN git config --global user.email "agent@example.com"
+RUN git config --global user.name "mr agent"
+
+# ========================= PROJECT SETUP =========================
+
+ARG MCP_TESTING_MODE="1"
+ENV MCP_TESTING_MODE=${MCP_TESTING_MODE}
+
+USER root
+
+# Install uv
+RUN pip install uv --break-system-packages
+
+# Python dependencies
+COPY ./pyproject.toml /mcp_server/pyproject.toml
+COPY ./uv.lock /mcp_server/uv.lock
+WORKDIR /mcp_server
+
+ENV RUST_LOG=warn
+RUN --mount=type=secret,id=LIB_GITHUB_PAT \
+    LIB_GITHUB_PAT="$(cat /run/secrets/LIB_GITHUB_PAT 2>/dev/null || echo '')" && \
+    git config --global url."https://${LIB_GITHUB_PAT}@github.com/".insteadOf "https://github.com/" && \
+    uv venv && . .venv/bin/activate && uv sync --no-install-project && uv pip install -e . && \
+    (git config --global --remove-section "url.https://${LIB_GITHUB_PAT}@github.com/" || true)
+
+ENV PYTHONPATH=/mcp_server/.venv/lib/python3.12/site-packages:/mcp_server
+ENV PATH=/mcp_server/.venv/bin:/home/ubuntu/.local/bin:$PATH
+
+# Copy torchtitan package, grading, and env
+COPY ./env.py /mcp_server/env.py
+COPY ./torchtitan/ /mcp_server/torchtitan/
+COPY ./grading/ /mcp_server/grading/
+RUN mkdir -p /mcp_server/data
+
+# Lock down env.py and grading so the agent cannot read grading logic
+RUN chmod 700 /mcp_server/env.py
+RUN chmod -R 700 /mcp_server/grading
+
+ENV _HUD_DEV_CHILD=1
+CMD ["hud", "dev", "env:env", "--stdio"]

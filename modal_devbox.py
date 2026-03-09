@@ -1,0 +1,279 @@
+"""Modal devbox for embedding training experiments.
+
+Setup:
+    pip install modal
+    modal setup
+    modal secret create lib-github-pat LIB_GITHUB_PAT=<pat>
+    modal secret create hud-keys HUD_API_KEY=<key>
+
+Usage:
+    modal shell modal_devbox.py::dev
+    modal run modal_devbox.py::smoke_test
+    modal run modal_devbox.py::run_agent
+"""
+
+import os
+
+import modal
+
+app = modal.App("ml-training-dev")
+
+vol = modal.Volume.from_name("ml-training-workspace", create_if_missing=True)
+
+lib_pat_secret = modal.Secret.from_name("lib-github-pat", required_keys=["LIB_GITHUB_PAT"])
+
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("git", "vim", "curl")
+    .pip_install(
+        "torch>=2.2.0",
+        "torchdata>=0.8.0",
+        "transformers>=4.40.0,<5",
+        "datasets>=2.14,<3.0",
+        "mteb>=1.12,<2",
+        "hud-python>=0.5.28",
+        "pytest",
+        "openai",
+        "tyro",
+        "tensorboard",
+        "einops",
+        "safetensors",
+        "tokenizers>=0.15.0",
+    )
+    .run_commands(
+        "bash -c 'pip install \"hud-sdlc-lib @ git+https://${LIB_GITHUB_PAT}@github.com/hud-evals/hud-sdlc-lib.git@main\"'",
+        secrets=[lib_pat_secret],
+    )
+    .run_commands(
+        # Pre-cache base model weights
+        "python -c \""
+        "from transformers import AutoModel, AutoTokenizer; "
+        "AutoTokenizer.from_pretrained('Qwen/Qwen3-0.6B', trust_remote_code=True); "
+        "AutoModel.from_pretrained('Qwen/Qwen3-0.6B', trust_remote_code=True)"
+        "\"",
+        # Pre-cache embedding model (for baseline/golden benchmarking)
+        "python -c \""
+        "from transformers import AutoModel, AutoTokenizer; "
+        "AutoTokenizer.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True); "
+        "AutoModel.from_pretrained('Qwen/Qwen3-Embedding-0.6B', trust_remote_code=True)"
+        "\"",
+        # Pre-cache MTEB eval datasets (SciFact)
+        "python -c \""
+        "import mteb; "
+        "tasks = mteb.get_tasks(tasks=['SciFact']); "
+        "[t.load_data() for t in tasks]"
+        "\"",
+        # Pre-cache BeIR datasets used by prepare_data
+        "python -c \""
+        "from datasets import load_dataset; "
+        "load_dataset('BeIR/scifact', 'corpus', split='corpus', trust_remote_code=True); "
+        "load_dataset('BeIR/scifact', 'queries', split='queries', trust_remote_code=True); "
+        "load_dataset('BeIR/scifact-qrels', split='train', trust_remote_code=True); "
+        "load_dataset('BeIR/scifact-qrels', split='test', trust_remote_code=True); "
+        "load_dataset('sentence-transformers/natural-questions', split='train')"
+        "\"",
+    )
+    .add_local_dir("torchtitan", remote_path="/code/torchtitan")
+    .add_local_dir("grading", remote_path="/code/grading")
+    .add_local_dir("tasks", remote_path="/code/tasks")
+    .add_local_file("env.py", remote_path="/code/env.py")
+    .add_local_file("local_test.py", remote_path="/code/local_test.py")
+)
+
+
+def _sync_workspace():
+    """Copy code into the writable workspace volume."""
+    import shutil
+    import subprocess
+
+    os.makedirs("/workspace", exist_ok=True)
+
+    dest = "/workspace/torchtitan"
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    subprocess.run(["cp", "-r", "/code/torchtitan", dest], check=True)
+    os.makedirs("/workspace/data", exist_ok=True)
+
+    if os.path.exists("/workspace/tasks"):
+        shutil.rmtree("/workspace/tasks")
+    subprocess.run(["cp", "-r", "/code/tasks", "/workspace/tasks"], check=True)
+
+    if os.path.exists("/workspace/grading"):
+        shutil.rmtree("/workspace/grading")
+    subprocess.run(["cp", "-r", "/code/grading", "/workspace/grading"], check=True)
+
+    for f in ["env.py", "local_test.py"]:
+        subprocess.run(["cp", f"/code/{f}", f"/workspace/{f}"], check=True)
+
+    os.chdir("/workspace")
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    volumes={"/workspace": vol},
+    timeout=7200,
+    secrets=[modal.Secret.from_name("hud-keys", required_keys=["HUD_API_KEY"])],
+)
+def dev():
+    """Interactive dev shell with GPU."""
+    import subprocess
+
+    _sync_workspace()
+    print("=== ML Training Devbox (torchtitan) ===")
+    print(f"GPU: {os.popen('nvidia-smi --query-gpu=name --format=csv,noheader').read().strip()}")
+    print("Workspace: /workspace")
+    print("  torchtitan: /workspace/torchtitan/")
+    print("  embedding:  /workspace/torchtitan/experiments/embedding/")
+    print("  data:       /workspace/data/")
+    print("")
+    print("Pipeline stages:")
+    print("  1. Generate synthetic data:  python -m torchtitan.experiments.embedding.prepare_data synthetic --corpus_dataset scifact --output data/synthetic.jsonl --max_samples 5000")
+    print("  2. Pre-train (stage 1):      python -m torchtitan.experiments.embedding.train --stage pretrain --train_data data/synthetic.jsonl --output_dir checkpoints/stage1 --epochs 1 --batch_size 4")
+    print("  3. Download labeled data:    python -m torchtitan.experiments.embedding.prepare_data download --dataset scifact --output data/train.jsonl --max_samples 500")
+    print("  4. Fine-tune (stage 2):      python -m torchtitan.experiments.embedding.train --stage finetune --resume_from checkpoints/stage1/epoch_1 --train_data data/train.jsonl --output_dir checkpoints/stage2 --epochs 1 --batch_size 4")
+    print("  5. Merge checkpoints:        python -m torchtitan.experiments.embedding.merge --checkpoints checkpoints/stage2/epoch_1 checkpoints/stage1/epoch_1 --output_dir checkpoints/merged")
+    print("  6. Evaluate:                 python -m torchtitan.experiments.embedding.evaluate --model checkpoints/merged --tasks SciFact")
+    print("")
+
+    subprocess.run(
+        ["bash", "-l"],
+        env={**os.environ, "PYTHONPATH": "/workspace"},
+    )
+
+    vol.commit()
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=3600,
+)
+def smoke_test():
+    """Run the full 3-stage pipeline with small data as a smoke test."""
+    import subprocess
+
+    os.makedirs("/workspace", exist_ok=True)
+    _sync_workspace()
+
+    env = {**os.environ, "PYTHONPATH": "/workspace"}
+    run = lambda cmd: subprocess.run(cmd, cwd="/workspace", env=env, check=True)
+
+    print("=== Stage 1: Generate synthetic data ===")
+    run([
+        "python", "-m", "torchtitan.experiments.embedding.prepare_data", "synthetic",
+        "--corpus_dataset", "scifact",
+        "--output", "data/synthetic.jsonl",
+        "--max_samples", "500",
+    ])
+
+    print("\n=== Stage 1: Pre-train ===")
+    run([
+        "python", "-m", "torchtitan.experiments.embedding.train",
+        "--stage", "pretrain",
+        "--train_data", "data/synthetic.jsonl",
+        "--output_dir", "checkpoints/stage1",
+        "--model", "Qwen/Qwen3-0.6B",
+        "--epochs", "1",
+        "--batch_size", "4",
+        "--max_seq_length", "256",
+    ])
+
+    print("\n=== Stage 2: Download labeled data ===")
+    run([
+        "python", "-m", "torchtitan.experiments.embedding.prepare_data", "download",
+        "--dataset", "scifact",
+        "--output", "data/train.jsonl",
+        "--max_samples", "200",
+    ])
+
+    print("\n=== Stage 2: Fine-tune from stage 1 ===")
+    run([
+        "python", "-m", "torchtitan.experiments.embedding.train",
+        "--stage", "finetune",
+        "--resume_from", "checkpoints/stage1/epoch_1",
+        "--train_data", "data/train.jsonl",
+        "--output_dir", "checkpoints/stage2",
+        "--model", "Qwen/Qwen3-0.6B",
+        "--epochs", "1",
+        "--batch_size", "4",
+        "--max_seq_length", "256",
+    ])
+
+    print("\n=== Stage 3: SLERP merge ===")
+    run([
+        "python", "-m", "torchtitan.experiments.embedding.merge",
+        "--checkpoints", "checkpoints/stage1/epoch_1", "checkpoints/stage2/epoch_1",
+        "--output_dir", "checkpoints/merged",
+    ])
+
+    print("\n=== Evaluate merged model ===")
+    run([
+        "python", "-m", "torchtitan.experiments.embedding.evaluate",
+        "--model", "checkpoints/merged",
+        "--tasks", "SciFact",
+        "--max_seq_length", "256",
+    ])
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=1800,
+)
+def benchmark():
+    """Evaluate baseline (raw LM) and golden (embedding model) on SciFact."""
+    import subprocess
+
+    os.makedirs("/workspace", exist_ok=True)
+    _sync_workspace()
+
+    env = {**os.environ, "PYTHONPATH": "/workspace"}
+
+    for label, model in [
+        ("Baseline (Qwen/Qwen3-0.6B, untrained LM)", "Qwen/Qwen3-0.6B"),
+        ("Golden (Qwen/Qwen3-Embedding-0.6B)", "Qwen/Qwen3-Embedding-0.6B"),
+    ]:
+        print(f"\n=== {label} ===")
+        result = subprocess.run(
+            [
+                "python", "-c",
+                "import sys; sys.path.insert(0, '.'); "
+                f"from torchtitan.experiments.embedding.evaluate import evaluate_mteb; "
+                f"import json; m = evaluate_mteb('{model}', ['SciFact']); "
+                f"print(json.dumps(m, indent=2))",
+            ],
+            cwd="/workspace", env=env, capture_output=True, text=True,
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print("STDERR:", result.stderr[-1000:])
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=86400,
+    secrets=[modal.Secret.from_name("hud-keys", required_keys=["HUD_API_KEY"])],
+)
+def run_agent(model: str = "claude-opus-4-6", max_steps: int = 500):
+    """Run an agent against the environment."""
+    import subprocess
+
+    os.makedirs("/workspace", exist_ok=True)
+    _sync_workspace()
+
+    print(f"=== Running agent ({model}, max_steps={max_steps}) ===")
+    subprocess.run(
+        ["python", "local_test.py", "--model", model, "--max-steps", str(max_steps)],
+        cwd="/workspace",
+        env={**os.environ, "PYTHONPATH": "/workspace", "MCP_TESTING_MODE": "1"},
+    )
+
+
+@app.local_entrypoint()
+def trigger():
+    """Deploy-friendly entrypoint: spawns run_agent on the deployed app."""
+    fn = modal.Function.from_name("ml-training-dev", "run_agent")
+    fn.spawn()
+    print("Spawned run_agent on deployed app. Safe to close terminal.")

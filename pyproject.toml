@@ -1,0 +1,54 @@
+[project]
+name = "ml-training-env"
+version = "0.1.0"
+description = "HUD environment for ML training experiments (torchtitan fork)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # HUD
+    "hud-python",
+    "hud-sdlc-lib",
+    # torchtitan core
+    "torch>=2.2.0",
+    "torchdata>=0.8.0",
+    "datasets>=2.14,<3.0",
+    "tokenizers>=0.15.0",
+    "safetensors",
+    "tyro",
+    "tensorboard",
+    "einops",
+    # Embedding experiment
+    "transformers>=4.40.0,<5",
+    "mteb>=1.12,<2",
+    # Dev
+    "pytest",
+    "peft>=0.18.1",
+    "qwen-vl-utils>=0.0.14",
+]
+
+[project.scripts]
+dev = "sdlc_scripts:dev"
+build = "sdlc_scripts:build"
+deploy = "sdlc_scripts:deploy"
+setup = "sdlc_scripts:setup"
+update-sdlc = "sdlc_scripts:update"
+new-task = "sdlc_scripts:new_task"
+sync-tasks = "sdlc_scripts:sync_tasks"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["torchtitan*"]
+
+[tool.setuptools]
+py-modules = ["sdlc_scripts"]
+
+[tool.uv.sources]
+hud-python = { path = "../hud-python", editable = true }
+hud-sdlc-lib = { path = "../hud-sdlc-lib", editable = true }
+
+[tool.uv]
+package = true
