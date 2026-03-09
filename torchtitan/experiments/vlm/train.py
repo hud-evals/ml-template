@@ -17,6 +17,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune VLM")
+    parser.add_argument("--flavor", default="debugmodel",
+                        help="Model flavor: debugmodel, qwen3_0.6B, qwen3_1.7B, etc.")
     parser.add_argument("--dataset", default="cc12m-test")
     parser.add_argument("--data_path", default=None)
     parser.add_argument("--tokenizer_path", required=True)
@@ -50,7 +52,7 @@ def main():
 
     config = MultiModalTrainerConfig(
         hf_assets_path=args.tokenizer_path,
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_registry(args.flavor),
         dump_folder=args.output_dir,
         training=TrainingConfig(
             local_batch_size=args.batch_size,
@@ -90,7 +92,7 @@ def main():
         os.makedirs(args.output_dir, exist_ok=True)
         metadata = {
             "task": "vlm_finetune",
-            "model": "debugmodel",
+            "model": args.flavor,
             "dataset": args.dataset,
             "steps": args.steps,
             "batch_size": args.batch_size,

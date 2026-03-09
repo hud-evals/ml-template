@@ -63,30 +63,77 @@ VLM_AGENT_CONFIG = {
         "Environment:\n"
         "  Working directory: /workspace\n"
         "  Framework: torchtitan/ with VLM experiment at torchtitan/experiments/vlm/\n"
-        "  Model: Small VLM with Llama3 decoder + SigLIP2 vision encoder (debugmodel, ~7M params)\n"
+        "  Model: Qwen3 decoder + SigLIP2 vision encoder\n"
+        "    Available flavors: debugmodel (~7M), qwen3_0.6B (~700M, Qwen3-0.6B + SigLIP2-Base),\n"
+        "                       qwen3_1.7B (~2B, Qwen3-1.7B + SigLIP2-Large)\n"
         "  Uses FlexAttention for both encoder and decoder.\n"
         "  Always use absolute paths.\n\n"
         "Pre-staged data:\n"
-        "  data/cc12m/  -- CC12M image-caption pairs (webdataset .tar format)\n"
-        "  tokenizer/   -- Tokenizer with special image tokens (<|image|>, <|begin_of_image|>, <|end_of_image|>)\n\n"
+        "  data/cc12m/       -- CC12M image-caption pairs (webdataset .tar format)\n"
+        "  tokenizer/        -- Llama3 tokenizer (for debugmodel only, vocab_size=2048)\n"
+        "  tokenizer_qwen3/  -- Qwen3 tokenizer with VLM special tokens (for qwen3_* flavors)\n\n"
         "Training:\n"
         "  PYTHONPATH=/workspace python -m torchtitan.experiments.vlm.train \\\n"
-        "    --dataset cc12m-test --data_path /workspace/data/cc12m \\\n"
-        "    --tokenizer_path /workspace/tokenizer \\\n"
-        "    --output_dir /workspace/checkpoints/vlm --steps 100 --batch_size 4\n\n"
+        "    --flavor qwen3_0.6B --dataset cc12m-test --data_path /workspace/data/cc12m \\\n"
+        "    --tokenizer_path /workspace/tokenizer_qwen3 \\\n"
+        "    --output_dir /workspace/checkpoints/vlm --steps 200 --batch_size 4\n\n"
         "Constraints:\n"
-        "  - debugmodel is small enough to train quickly on a single GPU\n"
+        "  - Use qwen3_0.6B for a proper training run (fits on a single H100)\n"
         "  - Dataset loops infinitely (set --steps to control training length)\n"
-        "  - Loss should decrease from ~8.0 to <1.0 within 50-100 steps\n"
+        "  - Loss should decrease steadily; expect convergence within 100-200 steps\n"
         "  - Bash session times out after 120s with no output. For training:\n"
-        "    nohup cmd > log.log 2>&1 & echo PID:$! -- then poll with: tail -20 log.log"
+        "    nohup cmd > log.log 2>&1 & echo PID:$! -- then poll with: tail -20 log.log\n"
+        "  - Delete intermediate checkpoints to save disk and speed up grading.\n"
+        "  - Write training_metadata.json into your checkpoint directory."
     ),
 }
 
-if MCP_TESTING_MODE:
-    coding_service = CodingService()
+_tools_initialized = False
+
+
+def init_tools(workspace: str | None = None):
+    """Initialize coding tools with workspace sandboxing. Call after WORKSPACE is set."""
+    global _tools_initialized
+    if _tools_initialized:
+        return
+    _tools_initialized = True
+
+    import asyncio as _aio
+
+    from hud.tools.coding.bash import ClaudeBashSession
     from hud.tools.coding.shell import ShellTool
-    ShellTool().register(coding_service.server)
+    from hud.tools.coding.utils import get_demote_preexec_fn
+
+    ws = workspace or WORKSPACE
+
+    class _SandboxedSession(ClaudeBashSession):
+        """Bash session locked to the workspace directory."""
+
+        async def start(self):
+            if self._started:
+                await _aio.sleep(0)
+                return
+            self._process = await _aio.create_subprocess_shell(
+                self.command,
+                stdin=_aio.subprocess.PIPE,
+                stdout=_aio.subprocess.PIPE,
+                stderr=_aio.subprocess.PIPE,
+                cwd=ws,
+                preexec_fn=get_demote_preexec_fn(),
+            )
+            self._started = True
+            self._timed_out = False
+            # Restrict: HOME to workspace, cd only allows workspace subtree
+            await self.run(
+                f'export HOME="{ws}" && '
+                f'cd() {{ local t="${{1:-.}}"; local r=$(realpath -m "$t" 2>/dev/null || echo "$t"); '
+                f'case "$r" in "{ws}"*) builtin cd "$t" ;; '
+                f'*) echo "Error: cannot navigate outside workspace" >&2; return 1 ;; esac; }}'
+            )
+
+    coding_service = CodingService()
+    coding_service.bash_tool.session = _SandboxedSession()
+    ShellTool(cwd=ws).register(coding_service.server)
     env.connect_server(coding_service.server)
 
 
@@ -277,6 +324,8 @@ def _setup_vlm_workspace():
     os.makedirs(f"{WORKSPACE}/data/cc12m", exist_ok=True)
     bash(f"cp {SRC_DIR}/tests/assets/cc12m_test/*.tar {WORKSPACE}/data/cc12m/")
     bash(f"cp -r {SRC_DIR}/tests/assets/tokenizer {WORKSPACE}/tokenizer")
+    if os.path.exists(f"{SRC_DIR}/tests/assets/tokenizer_qwen3"):
+        bash(f"cp -r {SRC_DIR}/tests/assets/tokenizer_qwen3 {WORKSPACE}/tokenizer_qwen3")
 
     os.chdir(WORKSPACE)
 
@@ -304,6 +353,20 @@ def _setup_vlm_workspace():
         for d in [SRC_DIR, "/code"]:
             if os.path.exists(d):
                 bash(f"chmod 700 {d}")
+
+
+def _write_code_fix_check_scripts(mutation_type: str):
+    from grading.checks import code_fix_check_script
+
+    with open("/tmp/check_code_fix.py", "w") as f:
+        f.write(code_fix_check_script(mutation_type))
+
+
+def _write_data_audit_check_scripts():
+    from grading.checks import data_cleaned_check_script
+
+    with open("/tmp/check_data_cleaned.py", "w") as f:
+        f.write(data_cleaned_check_script())
 
 
 def _write_vlm_check_scripts():
@@ -475,6 +538,7 @@ async def debug_embedding(
     _apply_code_mutation(mutation_type)
     yield prompt
     _write_check_scripts()
+    _write_code_fix_check_scripts(mutation_type)
     yield _grade(graders)
 
 
@@ -487,6 +551,8 @@ async def data_audit_embedding(
     leak_rate: float = 0.2,
 ):
     _setup_workspace()
+
+    import hashlib
 
     from grading.mutations import inject_data_leakage, inject_duplicates, inject_label_noise
 
@@ -501,8 +567,17 @@ async def data_audit_embedding(
     elif contamination == "duplicates":
         inject_duplicates(train_path, contaminated_path, dup_rate=noise_rate)
 
+    contamination_info = {
+        "type": contamination,
+        "hash": hashlib.md5(open(contaminated_path, "rb").read()).hexdigest(),
+        "line_count": sum(1 for _ in open(contaminated_path)),
+    }
+    with open("/tmp/contamination_info.json", "w") as f:
+        json.dump(contamination_info, f)
+
     yield prompt
     _write_check_scripts()
+    _write_data_audit_check_scripts()
     yield _grade(graders)
 
 
@@ -524,4 +599,5 @@ async def debug_vlm(
     _apply_vlm_code_mutation(mutation_type)
     yield prompt
     _write_vlm_check_scripts()
+    _write_code_fix_check_scripts(mutation_type)
     yield _grade(graders)

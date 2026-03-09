@@ -11,6 +11,7 @@ dist/*
 # data
 data
 workspace
+workspace_gpu*
 out
 wandb
 

@@ -78,6 +78,7 @@ image = (
     .add_local_dir("tasks", remote_path="/code/tasks")
     .add_local_file("env.py", remote_path="/code/env.py")
     .add_local_file("local_test.py", remote_path="/code/local_test.py")
+    .add_local_file("smoke_test.py", remote_path="/code/smoke_test.py")
 )
 
 
@@ -102,7 +103,7 @@ def _sync_workspace():
         shutil.rmtree("/workspace/grading")
     subprocess.run(["cp", "-r", "/code/grading", "/workspace/grading"], check=True)
 
-    for f in ["env.py", "local_test.py"]:
+    for f in ["env.py", "local_test.py", "smoke_test.py"]:
         subprocess.run(["cp", f"/code/{f}", f"/workspace/{f}"], check=True)
 
     os.chdir("/workspace")
@@ -221,6 +222,79 @@ def smoke_test():
     gpu="H100",
     timeout=1800,
 )
+def vlm_smoke_test():
+    """Run VLM training + evaluation as a smoke test."""
+    import subprocess
+
+    os.makedirs("/workspace", exist_ok=True)
+    _sync_workspace()
+
+    env = {**os.environ, "PYTHONPATH": "/workspace"}
+    run = lambda cmd: subprocess.run(cmd, cwd="/workspace", env=env, check=True)
+
+    print("=== VLM: Train (50 steps) ===")
+    run([
+        "python", "-m", "torchtitan.experiments.vlm.train",
+        "--dataset", "cc12m-test",
+        "--data_path", "/workspace/tests/assets/cc12m_test",
+        "--tokenizer_path", "/workspace/tests/assets/tokenizer",
+        "--output_dir", "/workspace/checkpoints/vlm",
+        "--steps", "50",
+        "--batch_size", "4",
+    ])
+
+    print("\n=== VLM: Evaluate ===")
+    run([
+        "python", "-m", "torchtitan.experiments.vlm.evaluate",
+        "--checkpoint_dir", "/workspace/checkpoints/vlm",
+        "--data_path", "/workspace/tests/assets/cc12m_test",
+        "--dataset", "cc12m-test",
+        "--tokenizer_path", "/workspace/tests/assets/tokenizer",
+        "--steps", "10",
+        "--batch_size", "4",
+    ])
+
+    import json
+    metrics_path = "/workspace/checkpoints/vlm/eval_metrics.json"
+    if os.path.exists(metrics_path):
+        with open(metrics_path) as f:
+            metrics = json.load(f)
+        print(f"\nVLM eval results: {json.dumps(metrics, indent=2)}")
+        val_loss = metrics.get("val_loss", 999)
+        assert val_loss < 5.0, f"VLM val_loss {val_loss} too high (expected < 5.0)"
+        print(f"PASS: val_loss = {val_loss}")
+    else:
+        raise FileNotFoundError("eval_metrics.json not produced")
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=1800,
+)
+def grading_smoke_test():
+    """Run the grading infrastructure smoke test on Modal."""
+    import subprocess
+
+    os.makedirs("/workspace", exist_ok=True)
+    _sync_workspace()
+
+    env = {**os.environ, "PYTHONPATH": "/workspace"}
+    result = subprocess.run(
+        ["python", "-m", "pytest", "/workspace/smoke_test.py", "-v", "--tb=short"],
+        cwd="/workspace",
+        env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Grading smoke test failed")
+    print("All grading smoke tests passed")
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=1800,
+)
 def benchmark():
     """Evaluate baseline (raw LM) and golden (embedding model) on SciFact."""
     import subprocess
@@ -256,24 +330,38 @@ def benchmark():
     timeout=86400,
     secrets=[modal.Secret.from_name("hud-keys", required_keys=["HUD_API_KEY"])],
 )
-def run_agent(model: str = "claude-opus-4-6", max_steps: int = 500):
-    """Run an agent against the environment."""
+def run_agent(task: str = "finetune_embedding", model: str = "claude-opus-4-6", max_steps: int = 500):
+    """Run an agent against a specific task."""
     import subprocess
 
     os.makedirs("/workspace", exist_ok=True)
     _sync_workspace()
 
-    print(f"=== Running agent ({model}, max_steps={max_steps}) ===")
+    print(f"=== Running agent: task={task}, model={model}, max_steps={max_steps} ===")
     subprocess.run(
-        ["python", "local_test.py", "--model", model, "--max-steps", str(max_steps)],
+        [
+            "python", "local_test.py",
+            "--task", task,
+            "--model", model,
+            "--max-steps", str(max_steps),
+        ],
         cwd="/workspace",
         env={**os.environ, "PYTHONPATH": "/workspace", "MCP_TESTING_MODE": "1"},
     )
 
 
 @app.local_entrypoint()
-def trigger():
-    """Deploy-friendly entrypoint: spawns run_agent on the deployed app."""
-    fn = modal.Function.from_name("ml-training-dev", "run_agent")
-    fn.spawn()
-    print("Spawned run_agent on deployed app. Safe to close terminal.")
+def trigger(
+    task: str = "finetune_embedding",
+    model: str = "claude-opus-4-6",
+    max_steps: int = 500,
+):
+    """CLI entrypoint: run or spawn an agent against a task.
+
+    Usage:
+        modal run modal_devbox.py --task vlm_finetune
+        modal run modal_devbox.py --task debug_embedding_loss --model grok-4-1-fast
+        modal run modal_devbox.py --task finetune_embedding --max-steps 200
+    """
+    print(f"Running: task={task}, model={model}, max_steps={max_steps}")
+    run_agent.remote(task=task, model=model, max_steps=max_steps)

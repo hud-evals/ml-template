@@ -16,10 +16,10 @@ task = merge_and_evaluate.task(
         {"name": "has_data",      "weight": 0.05, "command": f"ls {W}/data/*.jsonl 2>/dev/null | head -1"},
         *[{**c, "weight": 0.10} for c in CHECKS],
         {"name": "mteb_eval",     "weight": 0.10, "command": f"python /tmp/grader_eval.py {W}", "timeout": 1200},
-        {"name": "ndcg@10>=0.10", "weight": 0.10, "command": "python /tmp/check_ndcg.py 0.10"},
-        {"name": "ndcg@10>=0.30", "weight": 0.15, "command": "python /tmp/check_ndcg.py 0.30"},
-        {"name": "ndcg@10>=0.50", "weight": 0.15, "command": "python /tmp/check_ndcg.py 0.50"},
-        {"name": "ndcg@10>=0.65", "weight": 0.15, "command": "python /tmp/check_ndcg.py 0.65"},
+        {"name": "ndcg@10>=0.10", "weight": 0.10, "command": f"python /tmp/check_ndcg.py 0.10 {W}"},
+        {"name": "ndcg@10>=0.30", "weight": 0.15, "command": f"python /tmp/check_ndcg.py 0.30 {W}"},
+        {"name": "ndcg@10>=0.50", "weight": 0.15, "command": f"python /tmp/check_ndcg.py 0.50 {W}"},
+        {"name": "ndcg@10>=0.65", "weight": 0.15, "command": f"python /tmp/check_ndcg.py 0.65 {W}"},
     ],
 )
 task.slug = "merge_and_evaluate"

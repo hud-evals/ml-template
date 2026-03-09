@@ -12,7 +12,7 @@ import glob, json, os, sys
 
 workspace = sys.argv[1]
 src_dir = "{src_dir}"
-cache_path = "/tmp/grader_eval.json"
+cache_path = os.path.join(workspace, ".grader_eval.json")
 MAX_EVALS = 10
 GOLDEN_THRESHOLD = 0.65
 
@@ -56,10 +56,11 @@ print(f"Best: {{best_dir}} nDCG@10={{best_ndcg:.4f}}")
 def ndcg_check_script() -> str:
     """Script to check nDCG@10 against a threshold."""
     return '''
-import json, sys
+import json, sys, os
 
 threshold = float(sys.argv[1])
-cache_path = "/tmp/grader_eval.json"
+workspace = sys.argv[2]
+cache_path = os.path.join(workspace, ".grader_eval.json")
 
 with open(cache_path) as f:
     result = json.load(f)
@@ -125,6 +126,137 @@ sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
+# Code fix verification (debug tasks)
+# ---------------------------------------------------------------------------
+
+
+def code_fix_check_script(mutation_type: str) -> str:
+    """Script to verify the agent actually fixed the injected code bug.
+
+    Checks that the mutated pattern is no longer present in the workspace code.
+    Different fixes are acceptable as long as the bug pattern is gone.
+    """
+    checks = {
+        "buggy_loss": {
+            "file": "torchtitan/experiments/embedding/losses.py",
+            "bad_pattern": "# Embeddings used as-is (no normalization)",
+            "good_pattern": "normalize",
+            "description": "InfoNCE loss should normalize embeddings",
+        },
+        "bad_pooling": {
+            "file": "torchtitan/experiments/embedding/embedding_trainer.py",
+            "bad_pattern": "# Mean pooling over all tokens",
+            "good_pattern": "seq_lengths",
+            "description": "Should use last-token pooling, not mean pooling",
+        },
+        "buggy_projector": {
+            "file": "torchtitan/experiments/vlm/model/model.py",
+            "bad_pattern": "# Linear projection (no nonlinearity)",
+            "good_pattern": "silu|gelu|relu|tanh|leaky_relu|elu",
+            "description": "Projector should have a non-linearity between linear layers",
+        },
+        "bad_label_mask": {
+            "file": "torchtitan/experiments/vlm/datasets/mm_datasets.py",
+            "bad_pattern": "# Labels include all tokens (no masking)",
+            "good_pattern": "ignore_id|IGNORE|-100|special_token",
+            "description": "Special tokens should be masked in labels",
+        },
+    }
+
+    check = checks.get(mutation_type)
+    if not check:
+        return f'import sys; print("Unknown mutation: {mutation_type}"); sys.exit(1)'
+
+    return f'''
+import re, sys, os
+
+workspace = sys.argv[1]
+filepath = os.path.join(workspace, "{check['file']}")
+
+if not os.path.exists(filepath):
+    print(f"File not found: {{filepath}}")
+    sys.exit(1)
+
+with open(filepath) as f:
+    code = f.read()
+
+# Check the bug pattern is gone
+bad_pattern = """{check['bad_pattern']}"""
+if bad_pattern in code:
+    print("Bug NOT fixed: {check['description']}")
+    print(f"Found bug marker: {{bad_pattern!r}}")
+    sys.exit(1)
+
+# Check some form of fix is present
+good_pattern = r"{check['good_pattern']}"
+if not re.search(good_pattern, code, re.IGNORECASE):
+    print("Fix not detected: {check['description']}")
+    print(f"Expected pattern matching: {{good_pattern}}")
+    sys.exit(1)
+
+print("Code fix verified: {check['description']}")
+sys.exit(0)
+'''
+
+
+# ---------------------------------------------------------------------------
+# Data cleaning verification (data audit tasks)
+# ---------------------------------------------------------------------------
+
+
+def data_cleaned_check_script() -> str:
+    """Script to verify the agent modified training data to remove contamination.
+
+    Compares the current training data hash against the contaminated version
+    saved during setup.
+    """
+    return '''
+import hashlib, json, sys, os, glob
+
+workspace = sys.argv[1]
+info_path = "/tmp/contamination_info.json"
+
+if not os.path.exists(info_path):
+    print("No contamination info found (was setup run?)")
+    sys.exit(1)
+
+with open(info_path) as f:
+    info = json.load(f)
+
+# Check the original contaminated file
+data_path = os.path.join(workspace, "data", "scifact.jsonl")
+if not os.path.exists(data_path):
+    print("Training data file not found at expected path")
+    sys.exit(1)
+
+current_hash = hashlib.md5(open(data_path, "rb").read()).hexdigest()
+if current_hash == info["hash"]:
+    # Agent may have created a separate cleaned file - check for that
+    cleaned_files = glob.glob(f"{workspace}/data/*clean*") + glob.glob(f"{workspace}/data/*filtered*")
+    if cleaned_files:
+        print(f"Found cleaned data file(s): {cleaned_files}")
+        sys.exit(0)
+
+    # Also check training metadata for a different train_data path
+    for mf in glob.glob(f"{workspace}/**/training_metadata.json", recursive=True):
+        with open(mf) as f:
+            m = json.load(f)
+        train_data = m.get("train_data", "")
+        if train_data and "scifact.jsonl" not in os.path.basename(train_data):
+            print(f"Agent trained on different file: {train_data}")
+            sys.exit(0)
+
+    print(f"Training data unchanged from contaminated version (type={info['type']})")
+    sys.exit(1)
+
+orig_lines = info["line_count"]
+current_lines = sum(1 for _ in open(data_path))
+print(f"Data was modified: {orig_lines} -> {current_lines} lines (contamination: {info['type']})")
+sys.exit(0)
+'''
+
+
+# ---------------------------------------------------------------------------
 # VLM grading scripts
 # ---------------------------------------------------------------------------
 
@@ -181,15 +313,17 @@ import json, glob, os, sys, subprocess
 
 workspace = sys.argv[1]
 src_dir = "{src_dir}"
-cache_path = "/tmp/vlm_eval.json"
+cache_path = os.path.join(workspace, ".vlm_eval.json")
 
 # Find training output directory (has training_metadata.json)
 output_dir = None
+flavor = "debugmodel"
 for mf in glob.glob(f"{{workspace}}/**/training_metadata.json", recursive=True):
     with open(mf) as f:
         m = json.load(f)
     if m.get("task", "").startswith("vlm"):
         output_dir = os.path.dirname(mf)
+        flavor = m.get("model", "debugmodel")
         break
 
 if not output_dir:
@@ -205,8 +339,14 @@ for dp in [f"{{workspace}}/data/cc12m", f"{{workspace}}/tests/assets/cc12m_test"
     if os.path.isdir(dp):
         data_path = dp
         break
+
+# Pick tokenizer: qwen3 tokenizer for qwen3 flavors, default otherwise
 tok_path = None
-for tp in [f"{{workspace}}/tokenizer", f"{{workspace}}/tests/assets/tokenizer"]:
+if "qwen3" in flavor:
+    tok_candidates = [f"{{workspace}}/tokenizer_qwen3", f"{{workspace}}/tokenizer"]
+else:
+    tok_candidates = [f"{{workspace}}/tokenizer", f"{{workspace}}/tests/assets/tokenizer"]
+for tp in tok_candidates:
     if os.path.isdir(tp):
         tok_path = tp
         break
@@ -223,6 +363,7 @@ env = os.environ.copy()
 env["PYTHONPATH"] = workspace
 cmd = [
     sys.executable, "-m", "torchtitan.experiments.vlm.evaluate",
+    "--flavor", flavor,
     "--checkpoint_dir", output_dir,
     "--data_path", data_path,
     "--tokenizer_path", tok_path,
@@ -255,10 +396,11 @@ sys.exit(0)
 def vlm_loss_check_script() -> str:
     """Script to check VLM validation loss against a threshold."""
     return '''
-import json, sys
+import json, sys, os
 
 threshold = float(sys.argv[1])
-cache_path = "/tmp/vlm_eval.json"
+workspace = sys.argv[2]
+cache_path = os.path.join(workspace, ".vlm_eval.json")
 
 with open(cache_path) as f:
     result = json.load(f)

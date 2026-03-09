@@ -14,6 +14,7 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.llama3 import Llama3Model as Llama3
+from torchtitan.models.qwen3 import Qwen3Model
 
 from .args import Siglip2Config, SpecialTokens
 from .siglip2 import VisionTransformer
@@ -58,55 +59,35 @@ class Projector(nn.Module):
             nn.init.zeros_(self.w2.bias)
 
 
-class Llama3Siglip2Transformer(Llama3):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Llama3.Config):
-        encoder: Siglip2Config = field(default_factory=Siglip2Config)
+class _VLMMixin:
+    """Shared VLM logic for encoder + projector on any Decoder backbone."""
 
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.config = config
+    def _vlm_init(self, config):
         self.encoder = VisionTransformer(config.encoder)
         self.projector = Projector(in_dim=config.encoder.dim, out_dim=config.dim)
 
-    def init_weights(self, buffer_device=None):
-        super().init_weights(buffer_device=buffer_device)
+    def _vlm_init_weights(self):
         if self.encoder is not None:
             self.encoder.init_weights()
         if self.projector is not None:
             self.projector.init_weights()
 
-    def get_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        masks = super().get_attention_masks(input_batch, tokenizer, extra_inputs)
-        assert isinstance(masks, BlockMask)
-        if self.encoder is not None:
-            encoder_masks = self.encoder.get_attention_masks(
-                input_batch, tokenizer, extra_inputs
-            )
-            assert isinstance(encoder_masks, BlockMask)
-        return {"llama3_masks": masks, "encoder_masks": encoder_masks}
+    def _vlm_get_attention_masks(self, super_masks, input_batch, tokenizer, extra_inputs):
+        assert isinstance(super_masks, BlockMask)
+        encoder_masks = self.encoder.get_attention_masks(
+            input_batch, tokenizer, extra_inputs
+        )
+        assert isinstance(encoder_masks, BlockMask)
+        return {"llm_masks": super_masks, "encoder_masks": encoder_masks}
 
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor,
-        special_tokens: SpecialTokens,
-        attention_masks: AttentionMasksType | None = None,
-    ):
-        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+    def _vlm_forward(self, tokens, pixel_values, grid_thw, special_tokens, attention_masks):
         h_BSD = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         if self.encoder is not None:
-            assert (
-                attention_masks is not None
-            ), "encoder only allows FlexAttention, so the llama3 must use FlexAttention as well."
-            grid_hw = grid_thw[:, :, 1:]  # Siglip2 only support image hw
+            assert attention_masks is not None, (
+                "encoder only allows FlexAttention, so the LLM must use FlexAttention as well."
+            )
+            grid_hw = grid_thw[:, :, 1:]
             pixel_masks = E.reduce(grid_hw != -1, "n l hw -> n l", reduction="all")
             i_NLD = self.encoder(
                 pixel_values, pixel_masks, grid_hw, attention_masks["encoder_masks"]
@@ -117,8 +98,52 @@ class Llama3Siglip2Transformer(Llama3):
             )
 
         for layer in self.layers.values():
-            h_BSD = layer(h_BSD, self.freqs_cis, attention_masks["llama3_masks"])
+            h_BSD = layer(h_BSD, self.freqs_cis, attention_masks["llm_masks"])
 
         h_BSD = self.norm(h_BSD) if self.norm else h_BSD
         output = self.output(h_BSD) if self.output else h_BSD
         return output
+
+
+class Llama3Siglip2Transformer(_VLMMixin, Llama3):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Llama3.Config):
+        encoder: Siglip2Config = field(default_factory=Siglip2Config)
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.config = config
+        self._vlm_init(config)
+
+    def init_weights(self, buffer_device=None):
+        super().init_weights(buffer_device=buffer_device)
+        self._vlm_init_weights()
+
+    def get_attention_masks(self, input_batch, tokenizer, extra_inputs=None):
+        masks = super().get_attention_masks(input_batch, tokenizer, extra_inputs)
+        return self._vlm_get_attention_masks(masks, input_batch, tokenizer, extra_inputs)
+
+    def forward(self, tokens, pixel_values, grid_thw, special_tokens, attention_masks=None):
+        return self._vlm_forward(tokens, pixel_values, grid_thw, special_tokens, attention_masks)
+
+
+class Qwen3Siglip2Transformer(_VLMMixin, Qwen3Model):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Qwen3Model.Config):
+        encoder: Siglip2Config = field(default_factory=Siglip2Config)
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.config = config
+        self._vlm_init(config)
+
+    def init_weights(self, buffer_device=None):
+        super().init_weights(buffer_device=buffer_device)
+        self._vlm_init_weights()
+
+    def get_attention_masks(self, input_batch, tokenizer, extra_inputs=None):
+        masks = super().get_attention_masks(input_batch, tokenizer, extra_inputs)
+        return self._vlm_get_attention_masks(masks, input_batch, tokenizer, extra_inputs)
+
+    def forward(self, tokens, pixel_values, grid_thw, special_tokens, attention_masks=None):
+        return self._vlm_forward(tokens, pixel_values, grid_thw, special_tokens, attention_masks)

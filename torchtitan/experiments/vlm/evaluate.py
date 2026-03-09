@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="Evaluate VLM checkpoint")
     parser.add_argument("--checkpoint_dir", required=True)
+    parser.add_argument("--flavor", default="debugmodel",
+                        help="Model flavor: debugmodel, qwen3_0.6B, qwen3_1.7B, etc.")
     parser.add_argument("--data_path", default=None)
     parser.add_argument("--dataset", default="cc12m-test")
     parser.add_argument("--tokenizer_path", required=True)
@@ -49,7 +51,7 @@ def main():
 
     config = MultiModalTrainerConfig(
         hf_assets_path=args.tokenizer_path,
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_registry(args.flavor),
         dump_folder=args.checkpoint_dir,
         training=TrainingConfig(
             local_batch_size=args.batch_size,

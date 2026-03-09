@@ -14,8 +14,8 @@ task = pretrain_embedding.task(
     graders=[
         *[{**c, "weight": w} for c, w in zip(CHECKS, [0.10, 0.15, 0.15])],
         {"name": "mteb_eval",     "weight": 0.20, "command": f"python /tmp/grader_eval.py {W}", "timeout": 1200},
-        {"name": "ndcg@10>=0.05", "weight": 0.20, "command": "python /tmp/check_ndcg.py 0.05"},
-        {"name": "ndcg@10>=0.15", "weight": 0.20, "command": "python /tmp/check_ndcg.py 0.15"},
+        {"name": "ndcg@10>=0.05", "weight": 0.20, "command": f"python /tmp/check_ndcg.py 0.05 {W}"},
+        {"name": "ndcg@10>=0.15", "weight": 0.20, "command": f"python /tmp/check_ndcg.py 0.15 {W}"},
     ],
 )
 task.slug = "pretrain_embedding"
