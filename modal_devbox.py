@@ -74,8 +74,10 @@ image = (
         "\"",
     )
     .add_local_dir("torchtitan", remote_path="/code/torchtitan")
+    .add_local_dir("data", remote_path="/code/data")
     .add_local_dir("grading", remote_path="/code/grading")
     .add_local_dir("tasks", remote_path="/code/tasks")
+    .add_local_dir("tests", remote_path="/code/tests")
     .add_local_file("env.py", remote_path="/code/env.py")
     .add_local_file("local_test.py", remote_path="/code/local_test.py")
     .add_local_file("smoke_test.py", remote_path="/code/smoke_test.py")
@@ -103,6 +105,14 @@ def _sync_workspace():
         shutil.rmtree("/workspace/grading")
     subprocess.run(["cp", "-r", "/code/grading", "/workspace/grading"], check=True)
 
+    if os.path.exists("/workspace/data_pkg"):
+        shutil.rmtree("/workspace/data_pkg")
+    subprocess.run(["cp", "-r", "/code/data", "/workspace/data_pkg"], check=True)
+
+    if os.path.exists("/workspace/tests"):
+        shutil.rmtree("/workspace/tests")
+    subprocess.run(["cp", "-r", "/code/tests", "/workspace/tests"], check=True)
+
     for f in ["env.py", "local_test.py", "smoke_test.py"]:
         subprocess.run(["cp", f"/code/{f}", f"/workspace/{f}"], check=True)
 
@@ -129,9 +139,9 @@ def dev():
     print("  data:       /workspace/data/")
     print("")
     print("Pipeline stages:")
-    print("  1. Generate synthetic data:  python -m torchtitan.experiments.embedding.prepare_data synthetic --corpus_dataset scifact --output data/synthetic.jsonl --max_samples 5000")
+    print("  1. Generate synthetic data:  python -m data.build_datasets synthetic --corpus_dataset scifact --output data/synthetic.jsonl --max_samples 5000")
     print("  2. Pre-train (stage 1):      python -m torchtitan.experiments.embedding.train --stage pretrain --train_data data/synthetic.jsonl --output_dir checkpoints/stage1 --epochs 1 --batch_size 4")
-    print("  3. Download labeled data:    python -m torchtitan.experiments.embedding.prepare_data download --dataset scifact --output data/train.jsonl --max_samples 500")
+    print("  3. Download labeled data:    python -m data.build_datasets download --dataset scifact --output data/train.jsonl --max_samples 500")
     print("  4. Fine-tune (stage 2):      python -m torchtitan.experiments.embedding.train --stage finetune --resume_from checkpoints/stage1/epoch_1 --train_data data/train.jsonl --output_dir checkpoints/stage2 --epochs 1 --batch_size 4")
     print("  5. Merge checkpoints:        python -m torchtitan.experiments.embedding.merge --checkpoints checkpoints/stage2/epoch_1 checkpoints/stage1/epoch_1 --output_dir checkpoints/merged")
     print("  6. Evaluate:                 python -m torchtitan.experiments.embedding.evaluate --model checkpoints/merged --tasks SciFact")
@@ -139,7 +149,7 @@ def dev():
 
     subprocess.run(
         ["bash", "-l"],
-        env={**os.environ, "PYTHONPATH": "/workspace"},
+        env={**os.environ, "PYTHONPATH": "/workspace:/code"},
     )
 
     vol.commit()
@@ -157,12 +167,12 @@ def smoke_test():
     os.makedirs("/workspace", exist_ok=True)
     _sync_workspace()
 
-    env = {**os.environ, "PYTHONPATH": "/workspace"}
+    env = {**os.environ, "PYTHONPATH": "/workspace:/code"}
     run = lambda cmd: subprocess.run(cmd, cwd="/workspace", env=env, check=True)
 
     print("=== Stage 1: Generate synthetic data ===")
     run([
-        "python", "-m", "torchtitan.experiments.embedding.prepare_data", "synthetic",
+        "python", "-m", "data.build_datasets", "synthetic",
         "--corpus_dataset", "scifact",
         "--output", "data/synthetic.jsonl",
         "--max_samples", "500",
@@ -182,7 +192,7 @@ def smoke_test():
 
     print("\n=== Stage 2: Download labeled data ===")
     run([
-        "python", "-m", "torchtitan.experiments.embedding.prepare_data", "download",
+        "python", "-m", "data.build_datasets", "download",
         "--dataset", "scifact",
         "--output", "data/train.jsonl",
         "--max_samples", "200",
@@ -229,7 +239,7 @@ def vlm_smoke_test():
     os.makedirs("/workspace", exist_ok=True)
     _sync_workspace()
 
-    env = {**os.environ, "PYTHONPATH": "/workspace"}
+    env = {**os.environ, "PYTHONPATH": "/workspace:/code"}
     run = lambda cmd: subprocess.run(cmd, cwd="/workspace", env=env, check=True)
 
     print("=== VLM: Train (50 steps) ===")
@@ -279,7 +289,7 @@ def grading_smoke_test():
     os.makedirs("/workspace", exist_ok=True)
     _sync_workspace()
 
-    env = {**os.environ, "PYTHONPATH": "/workspace"}
+    env = {**os.environ, "PYTHONPATH": "/workspace:/code"}
     result = subprocess.run(
         ["python", "-m", "pytest", "/workspace/smoke_test.py", "-v", "--tb=short"],
         cwd="/workspace",
@@ -302,7 +312,7 @@ def benchmark():
     os.makedirs("/workspace", exist_ok=True)
     _sync_workspace()
 
-    env = {**os.environ, "PYTHONPATH": "/workspace"}
+    env = {**os.environ, "PYTHONPATH": "/workspace:/code"}
 
     for label, model in [
         ("Baseline (Qwen/Qwen3-0.6B, untrained LM)", "Qwen/Qwen3-0.6B"),
@@ -346,7 +356,7 @@ def run_agent(task: str = "finetune_embedding", model: str = "claude-opus-4-6", 
             "--max-steps", str(max_steps),
         ],
         cwd="/workspace",
-        env={**os.environ, "PYTHONPATH": "/workspace", "MCP_TESTING_MODE": "1"},
+        env={**os.environ, "PYTHONPATH": "/workspace:/code", "MCP_TESTING_MODE": "1"},
     )
 
 

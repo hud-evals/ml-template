@@ -25,6 +25,11 @@ else:
     SRC_DIR = str(_REPO_ROOT)
     WORKSPACE = str(_REPO_ROOT / "workspace")
 
+# Ensure SRC_DIR is on sys.path so grading imports 
+import sys
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
 env = CodingEnvironment("coding")
 
 AGENT_CONFIG = {
