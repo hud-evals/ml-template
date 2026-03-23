@@ -3,12 +3,7 @@
 Trains contrastive embedding models using InfoNCE loss with last-token (EOS) pooling.
 Uses torchtitan's Qwen3Model backbone with HF-format checkpoint export.
 
-Standalone usage:
-    python -m torchtitan.experiments.embedding.train \
-        --stage pretrain --train_data data/synthetic.jsonl \
-        --output_dir checkpoints/stage1 --epochs 1 --batch_size 4
-
-Torchtitan CLI:
+Usage:
     torchrun --nproc_per_node 1 -m torchtitan.train \
         --module embedding --config scifact_finetune
 """

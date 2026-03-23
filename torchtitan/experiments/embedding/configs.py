@@ -16,7 +16,5 @@ class EmbeddingConfig:
     false_negative_threshold: float = 0.1
     matryoshka_dims: list[int] | None = None
     output_dim: int | None = None
-    num_epochs: int = 3
-    save_steps: int | None = None
     train_data: str = ""
     eval_data: str | None = None

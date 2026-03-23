@@ -20,9 +20,9 @@ def infonce_loss(
 
     pos_scores = (query_embeds * positive_embeds).sum(dim=-1) / temperature
 
-    hard_neg_scores = torch.bmm(
-        negative_embeds, query_embeds.unsqueeze(-1)
-    ).squeeze(-1) / temperature
+    hard_neg_scores = (
+        torch.bmm(negative_embeds, query_embeds.unsqueeze(-1)).squeeze(-1) / temperature
+    )
 
     in_batch_scores = torch.mm(query_embeds, positive_embeds.t()) / temperature
 
@@ -56,7 +56,9 @@ def matryoshka_loss(
         q = query_embeds[:, :dim]
         p = positive_embeds[:, :dim]
         n = negative_embeds[:, :, :dim]
-        total_loss = total_loss + infonce_loss(q, p, n, temperature, false_neg_threshold)
+        total_loss = total_loss + infonce_loss(
+            q, p, n, temperature, false_neg_threshold
+        )
 
     return total_loss / len(dims)
 

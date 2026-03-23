@@ -1,43 +1,59 @@
 """Evaluate VLM training quality by computing validation loss.
 
-Usage:
+Provides ``evaluate_vlm`` as a library function.  Can also be invoked
+as a script::
+
     python -m torchtitan.experiments.vlm.evaluate \
         --checkpoint_dir checkpoints/vlm --data_path data/cc12m \
         --tokenizer_path tokenizer --steps 20
 """
 
-import argparse
+from __future__ import annotations
+
 import json
 import logging
+import math
 import os
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+import torch
+
+from torchtitan.experiments.vlm.model.args import VLMTokenNames
+
 logger = logging.getLogger(__name__)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate VLM checkpoint")
-    parser.add_argument("--checkpoint_dir", required=True)
-    parser.add_argument("--flavor", default="debugmodel",
-                        help="Model flavor: debugmodel, qwen3_0.6B, qwen3_1.7B, etc.")
-    parser.add_argument("--data_path", default=None)
-    parser.add_argument("--dataset", default="cc12m-test")
-    parser.add_argument("--tokenizer_path", required=True)
-    parser.add_argument("--steps", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--seq_len", type=int, default=2048)
-    args = parser.parse_args()
+def _ensure_single_gpu_env() -> None:
+    """Set distributed env-vars for single-GPU evaluation if not already set."""
+    defaults = {
+        "RANK": "0",
+        "WORLD_SIZE": "1",
+        "LOCAL_RANK": "0",
+        "LOCAL_WORLD_SIZE": "1",
+        "MASTER_ADDR": "localhost",
+        "MASTER_PORT": "29501",
+    }
+    for k, v in defaults.items():
+        os.environ.setdefault(k, v)
 
-    os.environ.setdefault("RANK", "0")
-    os.environ.setdefault("WORLD_SIZE", "1")
-    os.environ.setdefault("LOCAL_RANK", "0")
-    os.environ.setdefault("LOCAL_WORLD_SIZE", "1")
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "29501")
 
-    import math
+def evaluate_vlm(
+    checkpoint_dir: str,
+    tokenizer_path: str,
+    *,
+    flavor: str = "debugmodel",
+    data_path: str | None = None,
+    dataset: str = "cc12m-test",
+    steps: int = 20,
+    batch_size: int = 4,
+    seq_len: int = 2048,
+    vlm_token_names: "VLMTokenNames | None" = None,
+) -> dict:
+    """Run validation on a VLM checkpoint and return metrics dict.
 
-    import torch
+    Metrics are also saved to ``<checkpoint_dir>/eval_metrics.json``.
+    """
+    _ensure_single_gpu_env()
+
     from torchtitan.components.checkpoint import CheckpointManager
     from torchtitan.components.lr_scheduler import LRSchedulersContainer
     from torchtitan.components.metrics import MetricsProcessor
@@ -49,21 +65,21 @@ def main():
     from .configs import MultiModalTrainerConfig
     from .datasets.mm_datasets import HuggingFaceMultiModalDataLoader
 
+    dl_kwargs: dict = dict(dataset=dataset, dataset_path=data_path, infinite=True)
+    if vlm_token_names is not None:
+        dl_kwargs["vlm_token_names"] = vlm_token_names
+
     config = MultiModalTrainerConfig(
-        hf_assets_path=args.tokenizer_path,
-        model_spec=model_registry(args.flavor),
-        dump_folder=args.checkpoint_dir,
+        hf_assets_path=tokenizer_path,
+        model_spec=model_registry(flavor),
+        dump_folder=checkpoint_dir,
         training=TrainingConfig(
-            local_batch_size=args.batch_size,
-            global_batch_size=args.batch_size,
-            seq_len=args.seq_len,
-            steps=args.steps,
+            local_batch_size=batch_size,
+            global_batch_size=batch_size,
+            seq_len=seq_len,
+            steps=steps,
         ),
-        dataloader=HuggingFaceMultiModalDataLoader.Config(
-            dataset=args.dataset,
-            dataset_path=args.data_path,
-            infinite=True,
-        ),
+        dataloader=HuggingFaceMultiModalDataLoader.Config(**dl_kwargs),
         optimizer=OptimizersContainer.Config(lr=0.0),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=0),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -88,7 +104,7 @@ def main():
     data_iter = trainer.batch_generator(trainer.dataloader)
 
     with torch.no_grad():
-        for _ in range(args.steps):
+        for _ in range(steps):
             try:
                 input_dict, labels = next(data_iter)
                 for k, v in input_dict.items():
@@ -118,14 +134,34 @@ def main():
     }
     logger.info("Evaluation results: %s", json.dumps(metrics, indent=2))
 
-    metrics_path = os.path.join(args.checkpoint_dir, "eval_metrics.json")
+    metrics_path = os.path.join(checkpoint_dir, "eval_metrics.json")
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
     logger.info("Saved metrics to %s", metrics_path)
 
     trainer.close()
-    print(json.dumps(metrics, indent=2))
+    return metrics
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+
+    kwargs: dict = {}
+    args = sys.argv[1:]
+    i = 0
+    _INT_KEYS = {"steps", "batch_size", "seq_len"}
+    while i < len(args):
+        key = args[i].lstrip("-")
+        val = args[i + 1]
+        if key in _INT_KEYS:
+            kwargs[key] = int(val)
+        else:
+            kwargs[key] = val
+        i += 2
+
+    metrics = evaluate_vlm(**kwargs)
+    print(json.dumps(metrics, indent=2))

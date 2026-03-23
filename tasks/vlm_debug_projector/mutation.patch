@@ -1,0 +1,15 @@
+--- a/torchtitan/experiments/vlm/model/model.py
++++ b/torchtitan/experiments/vlm/model/model.py
+@@ -45,9 +45,9 @@
+         self.init_weights()
+ 
+     def forward(self, x_NLD: torch.Tensor):
+-        x_NLD = self.w1(x_NLD)
+-        x_NLD = nn.functional.silu(x_NLD)
+-        x_NLD = self.w2(x_NLD)
++        seq_len = x_NLD.size(1)
++        x_NLD = self.w2(self.w1(x_NLD[:, :1, :]))
++        x_NLD = x_NLD.expand(-1, seq_len, -1)
+         return x_NLD
+ 
+     def init_weights(self):

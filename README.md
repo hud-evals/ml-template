@@ -1,17 +1,6 @@
 # ml-template
 
-HUD evaluation environment for ML training tasks. Built on a [pytorch/torchtitan](https://github.com/pytorch/torchtitan) mirror with an embedding training experiment and adversarial scenarios.
-
-## Architecture
-
-The repo is a private torchtitan mirror (`upstream` remote) with HUD environment files at root. The agent works with the embedding experiment code in `torchtitan/experiments/embedding/`, training contrastive embedding models via InfoNCE loss on Qwen3-0.6B.
-
-The embedding experiment uses HuggingFace transformers directly (AutoModel, AdamW, save_pretrained) rather than torchtitan's Trainer/Qwen3Model. It lives under `torchtitan/experiments/` for organizational purposes but has its own standalone training loop.
-
-**8 evaluation tasks across 3 types:**
-- **Optimization** (4 tasks): pretrain, finetune, merge, full multi-stage pipeline
-- **Code debugging** (2 tasks): find and fix bugs in loss function or pooling strategy
-- **Data auditing** (2 tasks): detect and clean label noise or train/test leakage
+HUD evaluation environment for ML training tasks. 10 tasks across embedding retrieval, VLM, Flux diffusion, and MoE language models. All run on 1x H100 80GB via [pytorch/torchtitan](https://github.com/pytorch/torchtitan).
 
 ## Setup
 
@@ -24,41 +13,51 @@ cp .env.example .env
 uv sync
 ```
 
-## Local GPU Testing
+## Running Tasks
 
-All testing runs locally on a GPU machine. No Docker or cloud services needed.
-
-### 1. Smoke test (verify training pipeline)
+### Locally (requires GPU)
 
 ```bash
-PYTHONPATH=. uv run python -m torchtitan.experiments.embedding.prepare_data download \
-    --dataset scifact --output /tmp/test.jsonl --max_samples 100
-
-PYTHONPATH=. uv run python -m torchtitan.experiments.embedding.train \
-    --stage finetune --train_data /tmp/test.jsonl \
-    --output_dir /tmp/ckpt --epochs 1 --batch_size 2 --max_seq_length 128
-
-PYTHONPATH=. uv run python -m torchtitan.experiments.embedding.evaluate \
-    --model /tmp/ckpt/epoch_1 --tasks SciFact
-```
-
-### 2. Run agent against a task
-
-```bash
-# List available tasks
+# List tasks
 PYTHONPATH=. uv run python local_test.py --list
 
-# Run a specific task
-PYTHONPATH=. uv run python local_test.py --task finetune_embedding
-PYTHONPATH=. uv run python local_test.py --task debug_embedding_loss --model grok-4-1-fast
-PYTHONPATH=. uv run python local_test.py --task multistage_retrieval --max-steps 200
+# Run a task with a specific model
+PYTHONPATH=. uv run python local_test.py --task emb_debug_multi
+PYTHONPATH=. uv run python local_test.py --task emb_efficient --model claude-opus-4-6 --max-steps 200
 ```
 
-### 3. Docker-based validation (grading verification)
+### On Modal (no local GPU needed)
 
 ```bash
-uv run dev          # Start Docker container with scenario server
-uv run validate     # Run baseline-fail + golden-replay validation
+# Deploy once
+uv run modal deploy modal_devbox.py
+
+# Single task
+uv run python modal_devbox.py --task emb_debug_multi
+
+# Multiple tasks in parallel
+uv run python modal_devbox.py --tasks emb_debug_multi,moe_debug_balance,flux_debug_timestep
+
+# All tasks, 4 repeats each
+uv run python modal_devbox.py --all --repeats 4 --model claude-opus-4-6
+
+# Evaluate a checkpoint on MTEB + local evals
+uv run python modal_devbox.py --eval-checkpoint assets/checkpoints/scifact_base --eval-benchmarks SciFact --eval-local data/val.jsonl
+```
+
+## Running Tests
+
+```bash
+# Structural tests (no GPU)
+uv run pytest tasks/tests/ -v
+
+# GPU integration tests locally
+uv run pytest tasks/tests/tasks/ -v
+
+# GPU tests on Modal
+uv run modal deploy modal_devbox.py
+uv run python modal_devbox.py --test
+uv run python modal_devbox.py --test --test-filter emb
 ```
 
 ## Build & Deploy
@@ -66,26 +65,30 @@ uv run validate     # Run baseline-fail + golden-replay validation
 ```bash
 uv run build          # Build Docker image
 uv run deploy         # Deploy to HUD platform
-uv run sync-tasks     # Sync task definitions to platform
+uv run sync-tasks     # Sync task definitions
 ```
 
-## Pulling Upstream Updates
+## Architecture
 
-```bash
-git fetch upstream
-git merge upstream/main
-# Resolve any conflicts in pyproject.toml, .gitignore
+Private [pytorch/torchtitan](https://github.com/pytorch/torchtitan) mirror with HUD evaluation layer on top.
+
+```
+tasks/
+├── <slug>/task.py        # One package per task (prompt, graders, scenario args)
+├── graders/              # Reusable grader scripts (executed at grade time)
+├── mutations/            # Data/eval mutations + shared CLI entry point
+├── utils/                # Dataset builders, setup fixtures
+└── tests/                # Structural + GPU integration tests
 ```
 
-## File Reference
+`env.py` defines scenarios and the grading harness. Grader scripts run as subprocesses -- no direct imports from `tasks/` at runtime.
 
-| Path | Purpose |
-|------|---------|
-| `torchtitan/experiments/embedding/` | Embedding training experiment (our code) |
-| `env.py` | HUD scenario definitions (6 scenarios) |
-| `grading/` | Grading scripts + data mutations (hidden from agent) |
-| `tasks/` | Task prompts and scoring configs (8 tasks) |
-| `local_test.py` | Run agent against any task locally |
-| `Dockerfile.hud` | Docker build for HUD platform |
-| `modal_devbox.py` | Modal GPU dev/test (optional) |
-| `sdlc_scripts.py` | CLI wrappers for build/deploy/sync |
+### What we own vs upstream
+
+| Layer | Paths | Notes |
+|-------|-------|-------|
+| **HUD evaluation** | `env.py`, `tasks/`, `Dockerfile.hud`, `local_test.py`, `modal_devbox.py` | Safe to modify freely |
+| **Experiments** | `torchtitan/experiments/embedding/`, `torchtitan/experiments/vlm/` | Extend via `forward_backward_step` override |
+| **Model configs** | `torchtitan/models/flux/diagnostics.py`, `torchtitan/models/flux/config_registry.py` | Flux debug configs + diagnostics |
+
+Everything else under `torchtitan/` is upstream. Pull fixes via `git merge upstream/main`.

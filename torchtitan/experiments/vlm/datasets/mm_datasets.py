@@ -12,7 +12,7 @@ It supports both streaming and non-streaming datasets from HuggingFace.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -25,7 +25,7 @@ from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
-from ..model.args import SpecialTokens
+from ..model.args import SpecialTokens, VLMTokenNames
 from .mm_collator_nld import MultiModalCollatorNLD
 from .utils.image import calculate_image_tokens, process_image
 from .utils.packing import SamplePacker
@@ -200,7 +200,6 @@ MM_DATASETS = {
         sample_processor=_process_cc12_wd_sample,
     ),
     "cc12m-test": DatasetConfig(
-        # TODO: move test cc12m dataset to core test folder
         path="tests/assets/cc12m_test",
         loader=lambda path: load_dataset(
             path, split="train", data_files={"train": "*.tar"}, streaming=True
@@ -397,6 +396,10 @@ class HuggingFaceMultiModalDataLoader(ParallelAwareDataloader):
         packing_buffer_size: int = 0
         """Set >0 to enable sample packing buffer."""
 
+        vlm_token_names: VLMTokenNames = field(default_factory=VLMTokenNames)
+        """Special token names for VLM roles (img, boi, eoi, pad).
+        Defaults match Qwen3; override for other tokenizer families."""
+
     def __init__(
         self,
         config: Config,
@@ -408,7 +411,9 @@ class HuggingFaceMultiModalDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         **kwargs,
     ):
-        special_tokens = SpecialTokens.from_tokenizer(tokenizer)
+        special_tokens = SpecialTokens.from_tokenizer(
+            tokenizer, config.vlm_token_names
+        )
 
         mm_ds = HuggingFaceMultiModalDataset(
             dataset_name=config.dataset,

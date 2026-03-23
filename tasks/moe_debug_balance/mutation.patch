@@ -1,0 +1,9 @@
+--- a/torchtitan/models/deepseek_v3/__init__.py
++++ b/torchtitan/models/deepseek_v3/__init__.py
+@@ -41,6 +41,7 @@
+                 route_norm=False,
+                 score_before_experts=False,
++                load_balance_coeff=None,
+             ),
+             attention=Attention.Config(
+                 q_norm=RMSNorm.Config(),

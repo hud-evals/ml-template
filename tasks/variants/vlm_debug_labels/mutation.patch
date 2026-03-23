@@ -1,0 +1,16 @@
+--- a/torchtitan/experiments/vlm/datasets/mm_datasets.py
++++ b/torchtitan/experiments/vlm/datasets/mm_datasets.py
+@@ -118,12 +118,11 @@
+         input_ids = torch.tensor(tokens)
+         labels = torch.tensor(tokens)
+ 
+-        # Mask special tokens in labels
+         special_token_ids = torch.tensor(
+             [special_tokens.boi_id, special_tokens.eoi_id, special_tokens.img_id]
+         )
+         labels = torch.where(
+-            torch.isin(labels, special_token_ids), special_tokens.ignore_id, labels
++            torch.isin(labels, special_token_ids), labels, special_tokens.ignore_id
+         )
+ 
+         return {

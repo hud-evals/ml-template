@@ -10,6 +10,21 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 @dataclass
+class VLMTokenNames:
+    """Token string names the VLM pipeline uses for each role.
+
+    Different tokenizer families ship different token names for equivalent
+    concepts.  Set these per-model in the config registry so the mapping is
+    explicit rather than discovered at runtime.
+    """
+
+    img: str = "<|image_pad|>"
+    boi: str = "<|vision_start|>"
+    eoi: str = "<|vision_end|>"
+    pad: str = "<|vision_pad|>"
+
+
+@dataclass
 class SpecialTokens:
     img_token: str
     img_id: int
@@ -22,20 +37,34 @@ class SpecialTokens:
     ignore_id: int = -100  # Pytorch F.cross_entropy default
 
     @classmethod
-    def from_tokenizer(cls, tokenizer: HuggingFaceTokenizer):
-        SPECIAL_TOKENS_MAP = {
-            "img": "<|image|>",
-            "boi": "<|begin_of_image|>",
-            "eoi": "<|end_of_image|>",
-            "pad": "<|pad|>",
-        }
+    def from_tokenizer(
+        cls,
+        tokenizer: HuggingFaceTokenizer,
+        names: VLMTokenNames,
+    ) -> "SpecialTokens":
         added_tokens = tokenizer.tokenizer.get_added_tokens_decoder()
         token_to_id = {tok.content: tok_id for tok_id, tok in added_tokens.items()}
-        special_tokens_dict = {}
-        for prefix, tok in SPECIAL_TOKENS_MAP.items():
-            special_tokens_dict[f"{prefix}_token"] = tok
-            special_tokens_dict[f"{prefix}_id"] = token_to_id[tok]
-        return cls(**special_tokens_dict)
+
+        def _resolve(role: str, name: str) -> tuple[str, int]:
+            if name not in token_to_id:
+                raise KeyError(
+                    f"VLM special token '{role}' ({name!r}) not found in "
+                    f"tokenizer added tokens. Available: "
+                    f"{sorted(t.content for t in added_tokens.values())}"
+                )
+            return name, token_to_id[name]
+
+        img_tok, img_id = _resolve("img", names.img)
+        boi_tok, boi_id = _resolve("boi", names.boi)
+        eoi_tok, eoi_id = _resolve("eoi", names.eoi)
+        pad_tok, pad_id = _resolve("pad", names.pad)
+
+        return cls(
+            img_token=img_tok, img_id=img_id,
+            boi_token=boi_tok, boi_id=boi_id,
+            eoi_token=eoi_tok, eoi_id=eoi_id,
+            pad_token=pad_tok, pad_id=pad_id,
+        )
 
 
 @dataclass

@@ -1,16 +1,17 @@
-"""Evaluation script for embedding models using MTEB/BEIR benchmarks."""
+"""Evaluation utilities for embedding models.
 
-import argparse
+Provides ``evaluate_local`` (JSONL-based retrieval eval) and ``evaluate_mteb``
+(MTEB benchmark eval).  Both load HF-format checkpoints exported by
+``EmbeddingTrainer`` and return a metrics dict.
+"""
+
 import json
 import logging
 import math
-import os
-import sys
 
 import torch
 import torch.nn.functional as F
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -24,13 +25,23 @@ def _ndcg_at_k(relevances: list[float], k: int) -> float:
     return dcg / ideal if ideal > 0 else 0.0
 
 
-def _encode_texts(texts: list[str], model, tokenizer, device, max_seq_length: int, batch_size: int = 64) -> torch.Tensor:
+def _encode_texts(
+    texts: list[str],
+    model,
+    tokenizer,
+    device,
+    max_seq_length: int,
+    batch_size: int = 64,
+) -> torch.Tensor:
     all_embs = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         enc = tokenizer(
-            batch, max_length=max_seq_length, padding=True,
-            truncation=True, return_tensors="pt",
+            batch,
+            max_length=max_seq_length,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
         ).to(device)
         with torch.no_grad():
             out = model(**enc).last_hidden_state
@@ -49,7 +60,7 @@ def evaluate_local(
     output_dim: int | None = None,
     batch_size: int = 64,
 ) -> dict:
-    """Evaluate on a local JSONL eval file."""
+    """Evaluate on a local JSONL eval file.  Returns a metrics dict."""
     from transformers import AutoModel, AutoTokenizer
 
     from .datasets import format_document_input, format_query_input
@@ -57,7 +68,9 @@ def evaluate_local(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModel.from_pretrained(
-        model_path, trust_remote_code=True, torch_dtype=torch.bfloat16,
+        model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
     ).to(device)
     model.eval()
 
@@ -80,16 +93,22 @@ def evaluate_local(
     for text, idx in doc_to_idx.items():
         all_doc_texts[idx] = format_document_input(text, tokenizer.eos_token)
     logger.info("Encoding %d unique candidates...", len(all_doc_texts))
-    all_doc_embs = _encode_texts(all_doc_texts, model, tokenizer, device, max_seq_length, batch_size)
+    all_doc_embs = _encode_texts(
+        all_doc_texts, model, tokenizer, device, max_seq_length, batch_size
+    )
     if output_dim:
         all_doc_embs = F.normalize(all_doc_embs[:, :output_dim], dim=-1)
 
     q_texts = [
-        format_query_input(item.get("instruction", ""), item["query"], tokenizer.eos_token)
+        format_query_input(
+            item.get("instruction", ""), item["query"], tokenizer.eos_token
+        )
         for item in queries
     ]
     logger.info("Encoding %d queries...", len(q_texts))
-    all_q_embs = _encode_texts(q_texts, model, tokenizer, device, max_seq_length, batch_size)
+    all_q_embs = _encode_texts(
+        q_texts, model, tokenizer, device, max_seq_length, batch_size
+    )
     if output_dim:
         all_q_embs = F.normalize(all_q_embs[:, :output_dim], dim=-1)
 
@@ -135,7 +154,7 @@ def evaluate_mteb(
     batch_size: int = 64,
     max_seq_length: int = 512,
 ) -> dict:
-    """Evaluate using MTEB benchmark tasks."""
+    """Evaluate using MTEB benchmark tasks.  Returns a metrics dict."""
     import mteb
     import numpy as np
     from transformers import AutoModel, AutoTokenizer
@@ -143,7 +162,9 @@ def evaluate_mteb(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModel.from_pretrained(
-        model_path, trust_remote_code=True, torch_dtype=torch.bfloat16,
+        model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
     ).to(device)
     model.eval()
 
@@ -160,8 +181,11 @@ def evaluate_mteb(
             for i in range(0, len(sentences), self.batch_size):
                 batch = sentences[i : i + self.batch_size]
                 enc = self.tokenizer(
-                    batch, max_length=self.max_length, padding=True,
-                    truncation=True, return_tensors="pt",
+                    batch,
+                    max_length=self.max_length,
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt",
                 ).to(self.device)
                 with torch.no_grad():
                     out = self.model(**enc).last_hidden_state
@@ -183,7 +207,9 @@ def evaluate_mteb(
         task_name = task_result.task_name
         for split, split_scores in task_result.scores.items():
             for score_dict in split_scores:
-                ndcg = score_dict.get("ndcg_at_10", score_dict.get("cos_sim_spearman", 0))
+                ndcg = score_dict.get(
+                    "ndcg_at_10", score_dict.get("cos_sim_spearman", 0)
+                )
                 metrics[f"{task_name}/{split}/ndcg@10"] = ndcg
                 ndcg_scores.append(ndcg)
 
@@ -192,44 +218,3 @@ def evaluate_mteb(
     metrics["num_tasks"] = len(tasks)
 
     return metrics
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate embedding model")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--eval_data", default=None)
-    parser.add_argument("--tasks", nargs="*", default=None)
-    parser.add_argument("--max_seq_length", type=int, default=512)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--output_dim", type=int, default=None)
-    parser.add_argument("--output_file", default=None)
-    parser.add_argument("--threshold_ndcg", type=float, default=None)
-    args = parser.parse_args()
-
-    if args.eval_data:
-        metrics = evaluate_local(args.model, args.eval_data, args.max_seq_length, args.output_dim)
-    elif args.tasks:
-        metrics = evaluate_mteb(args.model, args.tasks, args.batch_size, args.max_seq_length)
-    else:
-        parser.error("Provide either --eval_data or --tasks")
-
-    output = json.dumps(metrics, indent=2)
-    print(output)
-
-    if os.path.isdir(args.model):
-        metrics_path = os.path.join(args.model, "metrics.json")
-        with open(metrics_path, "w") as f:
-            f.write(output)
-        logger.info("Wrote %s", metrics_path)
-
-    if args.output_file:
-        with open(args.output_file, "w") as f:
-            f.write(output)
-
-    if args.threshold_ndcg is not None and metrics.get("ndcg@10", 0) < args.threshold_ndcg:
-        logger.error("nDCG@10 %.4f below threshold %.4f", metrics["ndcg@10"], args.threshold_ndcg)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

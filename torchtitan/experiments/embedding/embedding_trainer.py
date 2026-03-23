@@ -3,26 +3,18 @@
 Uses torchtitan's Qwen3Model backbone with InfoNCE loss. Exports checkpoints
 in HF format for MTEB evaluation compatibility.
 
-Invocable via:
+Usage:
     torchrun --nproc_per_node 1 -m torchtitan.train \
         --module embedding --config scifact_finetune
-Or standalone:
-    python -m torchtitan.experiments.embedding.train \
-        --stage finetune --train_data data/scifact.jsonl --output_dir checkpoints
 """
 
-import json
 import logging
-import os
-import time
 from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.checkpoint.state_dict import get_model_state_dict
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.trainer import Trainer
 
@@ -45,8 +37,12 @@ def get_last_token_embeddings(hidden, attention_mask):
 class EmbeddingTrainer(Trainer):
     """Contrastive embedding trainer using torchtitan's Qwen3Model.
 
-    Overrides forward_backward_step for triple forward pass (query/pos/neg)
-    and InfoNCE loss. Saves checkpoints in HF format for evaluation.
+    Overrides ``forward_backward_step`` for triple forward pass (query/pos/neg)
+    and InfoNCE loss.  The base ``Trainer.train()`` loop drives training;
+    ``EmbeddingDataLoader`` handles multi-epoch iteration and the loop
+    terminates on ``DataloaderExhaustedError``.
+
+    On ``close()``, the final model is exported in HF format for evaluation.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -60,6 +56,8 @@ class EmbeddingTrainer(Trainer):
             default_factory=lambda: CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
+                last_save_in_hf=True,
+                last_save_model_only=True,
                 interval=999999,
             )
         )
@@ -68,11 +66,13 @@ class EmbeddingTrainer(Trainer):
         super().__init__(config)
         self.emb_config = config.embedding
 
-        from transformers import AutoTokenizer
-
-        self.hf_tokenizer = AutoTokenizer.from_pretrained(
-            config.embedding.model_name, trust_remote_code=True
-        )
+    def train(self):
+        """Override train to save checkpoint when data is exhausted."""
+        super().train()
+        # The base train() breaks on DataloaderExhaustedError without saving.
+        # Force a final save so HF export happens.
+        if self.step > 0 and self.step != self.config.training.steps:
+            self.checkpointer.save(self.step, last_step=True)
 
     def _get_hidden_states(self, tokens: torch.Tensor) -> torch.Tensor:
         """Forward through model backbone, returning hidden states before output projection."""
@@ -110,9 +110,7 @@ class EmbeddingTrainer(Trainer):
                 pos_emb = get_last_token_embeddings(pos_hidden, pos_mask)
 
                 neg_hidden = self._get_hidden_states(neg_ids.view(B * K, S))
-                neg_emb = get_last_token_embeddings(
-                    neg_hidden, neg_mask.view(B * K, S)
-                )
+                neg_emb = get_last_token_embeddings(neg_hidden, neg_mask.view(B * K, S))
                 neg_emb = neg_emb.view(B, K, -1)
 
                 if emb.matryoshka_dims and len(emb.matryoshka_dims) > 0:
@@ -138,105 +136,3 @@ class EmbeddingTrainer(Trainer):
 
         return loss.detach()
 
-    def _export_hf_checkpoint(
-        self, name: str, avg_loss: float | None = None
-    ) -> str:
-        """Export current model weights in HF format for evaluation."""
-        output_dir = self.config.dump_folder
-        ckpt_dir = os.path.join(output_dir, name)
-
-        if torch.distributed.get_rank() != 0:
-            return ckpt_dir
-
-        os.makedirs(ckpt_dir, exist_ok=True)
-
-        state_dict = get_model_state_dict(self.model_parts[0])
-        state_dict = {k: v.detach().cpu() for k, v in state_dict.items()}
-
-        from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
-
-        adapter = Qwen3StateDictAdapter(self.model_config, None)
-        hf_state_dict = adapter.to_hf(state_dict)
-
-        from safetensors.torch import save_file
-
-        save_file(hf_state_dict, os.path.join(ckpt_dir, "model.safetensors"))
-
-        from transformers import AutoConfig
-
-        hf_config = AutoConfig.from_pretrained(
-            self.emb_config.model_name, trust_remote_code=True
-        )
-        hf_config.save_pretrained(ckpt_dir)
-        self.hf_tokenizer.save_pretrained(ckpt_dir)
-
-        metadata = {
-            "stage": self.emb_config.stage,
-            "model_name": self.emb_config.model_name,
-            "resume_from": self.emb_config.resume_from,
-            "checkpoint": name,
-            "global_step": self.step,
-            "avg_loss": avg_loss,
-            "learning_rate": self.config.optimizer.lr,
-            "batch_size": self.config.training.local_batch_size,
-            "max_seq_length": self.config.training.seq_len,
-            "temperature": self.emb_config.temperature,
-            "num_hard_negatives": self.emb_config.num_hard_negatives,
-            "matryoshka_dims": self.emb_config.matryoshka_dims,
-        }
-        with open(os.path.join(ckpt_dir, "training_metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=2)
-
-        logger.info("Exported HF checkpoint: %s", ckpt_dir)
-        return ckpt_dir
-
-    def train(self):
-        """Epoch-based training with HF checkpoint export."""
-        config = self.config
-        emb = self.emb_config
-
-        self.checkpointer.load(step=config.checkpoint.load_step)
-        logger.info("Training starts at step %d", self.step + 1)
-
-        for epoch in range(emb.num_epochs):
-            data_iterator = self.batch_generator(self.dataloader)
-            epoch_steps = 0
-
-            while True:
-                self.step += 1
-                self.gc_handler.run(self.step)
-                try:
-                    self.train_step(data_iterator)
-                except DataloaderExhaustedError:
-                    break
-                epoch_steps += 1
-
-            logger.info(
-                "Epoch %d/%d complete (%d steps)",
-                epoch + 1,
-                emb.num_epochs,
-                epoch_steps,
-            )
-
-            ckpt_dir = self._export_hf_checkpoint(f"epoch_{epoch + 1}")
-
-            if emb.eval_data:
-                from .evaluate import evaluate_local
-
-                metrics = evaluate_local(
-                    ckpt_dir, emb.eval_data, config.training.seq_len
-                )
-                logger.info("Eval metrics: %s", json.dumps(metrics, indent=2))
-                with open(os.path.join(ckpt_dir, "metrics.json"), "w") as f:
-                    json.dump(metrics, f, indent=2)
-
-        if torch.distributed.get_rank() == 0:
-            time.sleep(2)
-
-        logger.info("Training completed")
-
-    def close(self):
-        if hasattr(self, "checkpointer"):
-            self.checkpointer.close()
-        if hasattr(self, "metrics_processor"):
-            self.metrics_processor.close()

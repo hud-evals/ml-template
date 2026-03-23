@@ -1,0 +1,14 @@
+--- a/torchtitan/trainer.py
++++ b/torchtitan/trainer.py
+@@ -820,6 +820,11 @@
+                 except DataloaderExhaustedError:
+                     logger.warning("Ran out of data; last step was canceled.")
+                     break
++                # Quantize weights between steps for memory efficiency
++                with torch.no_grad():
++                    for p in self.model_parts[0].parameters():
++                        p.data.copy_(p.data.half().float())
++
+ 
+                 self.checkpointer.save(
+                     self.step, last_step=(self.step == config.training.steps)

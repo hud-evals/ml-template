@@ -1,0 +1,11 @@
+--- a/torchtitan/experiments/embedding/losses.py
++++ b/torchtitan/experiments/embedding/losses.py
+@@ -18,7 +18,7 @@
+     positive_embeds = F.normalize(positive_embeds, dim=-1)
+     negative_embeds = F.normalize(negative_embeds, dim=-1)
+
+-    pos_scores = (query_embeds * positive_embeds).sum(dim=-1) / temperature
++    pos_scores = (query_embeds * positive_embeds).sum(dim=-1)
+
+     hard_neg_scores = (
+         torch.bmm(negative_embeds, query_embeds.unsqueeze(-1)).squeeze(-1) / temperature

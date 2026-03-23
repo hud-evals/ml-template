@@ -1,0 +1,15 @@
+--- a/torchtitan/models/flux/flux_datasets.py
++++ b/torchtitan/models/flux/flux_datasets.py
+@@ -285,10 +285,10 @@
+             # pyrefly: ignore [missing-attribute]
+             dropout_prob = self.classifier_free_guidance_prob
+             if dropout_prob > 0.0:
+-                if torch.rand(1).item() < dropout_prob:
++                drop_text = torch.rand(1).item() < dropout_prob
++                if drop_text:
+                     sample_dict["t5_tokens"] = self._t5_empty_token
+-                if torch.rand(1).item() < dropout_prob:
+                     sample_dict["clip_tokens"] = self._clip_empty_token
+ 
+             self._sample_idx += 1
+ 

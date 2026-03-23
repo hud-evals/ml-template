@@ -1,0 +1,13 @@
+--- a/torchtitan/experiments/embedding/embedding_trainer.py
++++ b/torchtitan/experiments/embedding/embedding_trainer.py
+@@ -35,9 +35,7 @@
+ 
+ def get_last_token_embeddings(hidden, attention_mask):
+     """Extract embeddings from the last non-padding token (EOS position)."""
+-    seq_lengths = attention_mask.sum(dim=-1) - 1
+-    batch_indices = torch.arange(hidden.size(0), device=hidden.device)
+-    last_hidden = hidden[batch_indices, seq_lengths]
++    last_hidden = (hidden * attention_mask.unsqueeze(-1)).sum(dim=1) / attention_mask.sum(dim=-1, keepdim=True)
+ 
+     return F.normalize(last_hidden, dim=-1)
+ 

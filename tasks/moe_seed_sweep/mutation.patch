@@ -1,0 +1,23 @@
+--- a/torchtitan/models/common/feed_forward.py
++++ b/torchtitan/models/common/feed_forward.py
+@@ -55,9 +55,5 @@
+ 
+     def init_weights(self, init_std: float = 0.02, **kwargs):
+         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+-        if self.w1.bias is not None:
+-            nn.init.zeros_(self.w1.bias)
+         for linear in (self.w2, self.w3):
+             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+-            if linear.bias is not None:
+-                nn.init.zeros_(linear.bias)
+--- a/torchtitan/models/common/moe/moe.py
++++ b/torchtitan/models/common/moe/moe.py
+@@ -304,8 +304,6 @@
+ 
+     def init_weights(self, init_std: float):
+         nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+-        if self.gate.bias is not None:
+-            nn.init.zeros_(self.gate.bias)
+ 
+ 
+ # NOTE: the reason we make this a stateless module is to support

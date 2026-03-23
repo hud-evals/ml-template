@@ -222,6 +222,13 @@ def sync_tasks():
     from sdlc.cli.sync_tasks import sync_tasks as _sync
 
     tasks, task_ids = _collect_tasks()
+
+    # Apply env-level agent_config (system_prompt) to all tasks
+    from env import AGENT_CONFIG
+    for task in tasks.values():
+        if not getattr(task, "agent_config", None):
+            task.agent_config = AGENT_CONFIG
+
     dotenv = _load_env()
     _sync(tasks, task_ids, env_name=dotenv.get("ENV_NAME", ""), taskset=dotenv.get("TASKSET_NAME", ""))
 

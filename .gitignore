@@ -21,6 +21,9 @@ assets/hf/*
 assets/tokenizer/*
 torchtitan/experiments/flux/assets/*
 
+# generated training data
+data/*.jsonl
+
 # temp files
 *.log
 error.json

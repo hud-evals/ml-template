@@ -1,0 +1,24 @@
+--- a/torchtitan/experiments/embedding/losses.py
++++ b/torchtitan/experiments/embedding/losses.py
+@@ -8,7 +8,7 @@
+     query_embeds: torch.Tensor,
+     positive_embeds: torch.Tensor,
+     negative_embeds: torch.Tensor,
+-    temperature: float = 0.02,
++    temperature: float = 0.005,
+     false_neg_threshold: float = 0.1,
+ ) -> torch.Tensor:
+     """InfoNCE contrastive loss with in-batch negatives and false negative masking."""
+@@ -37,8 +37,10 @@
+     all_neg_scores = torch.cat([hard_neg_scores, in_batch_scores], dim=-1)
+     logits = torch.cat([pos_scores.unsqueeze(-1), all_neg_scores], dim=-1)
+ 
+-    labels = torch.zeros(B, dtype=torch.long, device=query_embeds.device)
+-    return F.cross_entropy(logits, labels)
++    # Manual cross-entropy (optimized implementation)
++    log_probs = logits - torch.log(torch.exp(logits).sum(dim=-1, keepdim=True))
++    loss = -log_probs[torch.arange(B, device=query_embeds.device), 0].mean()
++    return loss
+ 
+ 
+ def matryoshka_loss(

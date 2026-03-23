@@ -1,0 +1,9 @@
+--- a/torchtitan/experiments/embedding/losses.py
++++ b/torchtitan/experiments/embedding/losses.py
+@@ -38,6 +38,8 @@
+     logits = torch.cat([pos_scores.unsqueeze(-1), all_neg_scores], dim=-1)
+ 
++    # Cast to float16 for memory-efficient loss computation
++    logits = logits.half()
+     labels = torch.zeros(B, dtype=torch.long, device=query_embeds.device)
+     return F.cross_entropy(logits, labels)

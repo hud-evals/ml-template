@@ -44,6 +44,8 @@ def flux_debugmodel() -> FluxTrainer.Config:
             steps=10,
         ),
         dataloader=FluxDataLoader.Config(
+            dataset="cc12m-test",
+            dataset_path="data/cc12m",
             classifier_free_guidance_prob=0.447,
             img_size=256,
             encoder=encoder,

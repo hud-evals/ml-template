@@ -1,13 +1,18 @@
-"""Model merging via Spherical Linear Interpolation (SLERP)."""
+"""Model merging via Spherical Linear Interpolation (SLERP).
 
-import argparse
+Provides ``slerp_merge`` as a library function.  Can also be invoked
+as a script::
+
+    python -m torchtitan.experiments.embedding.merge \
+        --checkpoints ckpt_a ckpt_b --output_dir merged
+"""
+
 import json
 import logging
 import os
 
 import torch
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -25,8 +30,9 @@ def _slerp(t: float, v0: torch.Tensor, v1: torch.Tensor) -> torch.Tensor:
         result = (1.0 - t) * v0_flat + t * v1_flat
     else:
         sin_omega = torch.sin(omega)
-        result = (torch.sin((1.0 - t) * omega) / sin_omega) * v0_flat + \
-                 (torch.sin(t * omega) / sin_omega) * v1_flat
+        result = (torch.sin((1.0 - t) * omega) / sin_omega) * v0_flat + (
+            torch.sin(t * omega) / sin_omega
+        ) * v1_flat
 
     return result.reshape(v0.shape).to(v0.dtype)
 
@@ -35,7 +41,8 @@ def slerp_merge(
     checkpoints: list[str],
     output_dir: str,
     weights: list[float] | None = None,
-):
+) -> str:
+    """SLERP-merge two or more HF checkpoints and save the result."""
     if len(checkpoints) < 2:
         raise ValueError("Need at least 2 checkpoints to merge")
 
@@ -43,7 +50,9 @@ def slerp_merge(
         weights = [1.0 / len(checkpoints)] * len(checkpoints)
 
     if len(weights) != len(checkpoints):
-        raise ValueError(f"Got {len(weights)} weights for {len(checkpoints)} checkpoints")
+        raise ValueError(
+            f"Got {len(weights)} weights for {len(checkpoints)} checkpoints"
+        )
 
     weight_sum = sum(weights)
     weights = [w / weight_sum for w in weights]
@@ -52,6 +61,7 @@ def slerp_merge(
     state_dicts = []
     for ckpt in checkpoints:
         from transformers import AutoModel
+
         m = AutoModel.from_pretrained(ckpt, trust_remote_code=True)
         state_dicts.append(m.state_dict())
         del m
@@ -61,7 +71,9 @@ def slerp_merge(
 
     for i in range(1, len(state_dicts)):
         t = weights[i] / (cumulative_weight + weights[i])
-        logger.info("SLERP merge: checkpoint %d/%d (t=%.3f)", i + 1, len(state_dicts), t)
+        logger.info(
+            "SLERP merge: checkpoint %d/%d (t=%.3f)", i + 1, len(state_dicts), t
+        )
 
         for key in merged_sd:
             if merged_sd[key].dtype in (torch.float16, torch.bfloat16, torch.float32):
@@ -74,6 +86,7 @@ def slerp_merge(
     os.makedirs(output_dir, exist_ok=True)
 
     from transformers import AutoModel, AutoTokenizer
+
     base_model = AutoModel.from_pretrained(checkpoints[0], trust_remote_code=True)
     base_model.load_state_dict(merged_sd)
     base_model.save_pretrained(output_dir)
@@ -94,15 +107,31 @@ def slerp_merge(
     return output_dir
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Merge model checkpoints via SLERP")
-    parser.add_argument("--checkpoints", nargs="+", required=True)
-    parser.add_argument("--weights", type=float, nargs="*", default=None)
-    parser.add_argument("--output_dir", required=True)
-    args = parser.parse_args()
-
-    slerp_merge(args.checkpoints, args.output_dir, args.weights)
-
-
 if __name__ == "__main__":
-    main()
+    import sys
+
+    args = sys.argv[1:]
+    checkpoints: list[str] = []
+    output_dir = ""
+    merge_weights: list[float] | None = None
+    i = 0
+    while i < len(args):
+        key = args[i]
+        if key == "--checkpoints":
+            i += 1
+            while i < len(args) and not args[i].startswith("--"):
+                checkpoints.append(args[i])
+                i += 1
+        elif key == "--output_dir":
+            output_dir = args[i + 1]
+            i += 2
+        elif key == "--weights":
+            i += 1
+            merge_weights = []
+            while i < len(args) and not args[i].startswith("--"):
+                merge_weights.append(float(args[i]))
+                i += 1
+        else:
+            i += 1
+
+    slerp_merge(checkpoints, output_dir, merge_weights)
