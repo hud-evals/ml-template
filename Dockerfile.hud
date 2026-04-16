@@ -41,7 +41,7 @@ ENV RUST_LOG=warn
 RUN uv venv --relocatable /opt/venv && \
     UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --no-install-project
 
-ENV PYTHONPATH=/home/ubuntu/workspace
+ENV PYTHONPATH=/mcp_server:/home/ubuntu/workspace
 ENV PATH=/home/ubuntu/workspace/.venv/bin:/opt/venv/bin:/home/ubuntu/.local/bin:$PATH
 ENV HF_HOME=/home/ubuntu/.cache/huggingface
 
@@ -51,6 +51,7 @@ COPY ./run_train.sh /mcp_server/run_train.sh
 COPY ./torchtitan/ /mcp_server/torchtitan/
 COPY ./tests/ /mcp_server/tests/
 COPY ./scripts/ /mcp_server/scripts/
+RUN mkdir -p /mcp_server/tasks && touch /mcp_server/tasks/__init__.py
 COPY ./tasks/mutations/ /mcp_server/tasks/mutations/
 COPY ./tasks/utils/ /mcp_server/tasks/utils/
 

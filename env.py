@@ -30,24 +30,12 @@ def bash(cmd: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
             raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
     return result
 
-_REPO_ROOT = Path(__file__).parent
-
 SRC_DIR = "/mcp_server"
 WORKSPACE = "/home/ubuntu/workspace"
 
-if Path("/mcp_server/torchtitan").exists():
-    _src_dir = "/mcp_server"
-    _workspace = "/home/ubuntu/workspace"
-elif Path("/code/torchtitan").exists():
-    _src_dir = "/code"
-    _workspace = "/workspace"
-else:
-    _src_dir = str(_REPO_ROOT)
-    _workspace = str(_REPO_ROOT / "workspace")
-
 import sys
-if _src_dir not in sys.path:
-    sys.path.insert(0, _src_dir)
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
 env = Environment("ml-template-1")
 
@@ -74,8 +62,8 @@ AGENT_CONFIG = {
 _tools_initialized = False
 
 
-def init_tools(workspace: str | None = None):
-    """Initialize coding tools with workspace sandboxing. Call after WORKSPACE is set."""
+def init_tools():
+    """Initialize coding tools with workspace sandboxing."""
     global _tools_initialized
     if _tools_initialized:
         return
@@ -90,9 +78,7 @@ def init_tools(workspace: str | None = None):
                 "! -name assets ! -name data "
                 "-exec chmod -R 700 {} +"
             )
-        # Lock grader state files (contamination info etc.) written during setup.
         os.system("chmod -R 700 /tmp/.grader_* 2>/dev/null || true")
-        # Hide other users' processes so the agent can't see task name from ps.
         os.system("mount -o remount,hidepid=2 /proc 2>/dev/null || true")
     _tools_initialized = True
 
@@ -117,7 +103,7 @@ def init_tools(workspace: str | None = None):
         GeminiSearchTool,
     )
 
-    ws = workspace or _workspace
+    ws = WORKSPACE
 
     class _SandboxedSession(ClaudeBashSession):
         """Bash session locked to the workspace directory."""
@@ -141,18 +127,14 @@ def init_tools(workspace: str | None = None):
                 f'export PATH="{ws}/.venv/bin:/usr/bin:/bin" && '
                 f'export PYTHONPATH="{ws}" && '
                 f'_ws="{ws}" && '
-                # Restrict cd to workspace
                 f'cd() {{ local t="${{1:-.}}"; local r=$(realpath -m "$t" 2>/dev/null || echo "$t"); '
                 f'case "$r" in "$_ws"*) builtin cd "$t" ;; '
                 f'*) echo "Error: cannot navigate outside workspace" >&2; return 1 ;; esac; }} && '
-                # Restrict ls to workspace paths
                 f'ls() {{ for a in "$@"; do case "$a" in -*) ;; /*) '
                 f'case "$a" in "$_ws"*) ;; *) echo "Error: cannot list outside workspace" >&2; return 1 ;; esac ;; esac; done; '
                 f'command ls "$@"; }} && '
-                # Restrict find to workspace
                 f'find() {{ case "$1" in "$_ws"*|.*) command find "$@" ;; '
                 f'*) echo "Error: cannot search outside workspace" >&2; return 1 ;; esac; }} && '
-                # Restrict cat/head/tail to workspace paths
                 f'_check_path() {{ for a in "$@"; do case "$a" in -*|"") ;; /*) '
                 f'case "$a" in "$_ws"*|/dev/*|/proc/self/*) ;; *) echo "Error: cannot access outside workspace: $a" >&2; return 1 ;; esac ;; esac; done; return 0; }} && '
                 f'cat() {{ _check_path "$@" && command cat "$@"; }} && '
@@ -224,25 +206,25 @@ def _setup_workspace(setup_command: str | None = None):
     and a relocatable Python venv. Task-specific assets are downloaded
     by the setup_command.
     """
-    shutil.rmtree(_workspace, ignore_errors=True)
-    os.makedirs(_workspace, exist_ok=True)
+    shutil.rmtree(WORKSPACE, ignore_errors=True)
+    os.makedirs(WORKSPACE, exist_ok=True)
 
-    bash(f"cp -r {_src_dir}/torchtitan {_workspace}/torchtitan")
-    bash(f"cp -r {_src_dir}/tests {_workspace}/tests")
-    if os.path.exists(f"{_src_dir}/run_train.sh"):
-        bash(f"cp {_src_dir}/run_train.sh {_workspace}/run_train.sh")
-        bash(f"chmod +x {_workspace}/run_train.sh")
+    bash(f"cp -r {SRC_DIR}/torchtitan {WORKSPACE}/torchtitan")
+    bash(f"cp -r {SRC_DIR}/tests {WORKSPACE}/tests")
+    if os.path.exists(f"{SRC_DIR}/run_train.sh"):
+        bash(f"cp {SRC_DIR}/run_train.sh {WORKSPACE}/run_train.sh")
+        bash(f"chmod +x {WORKSPACE}/run_train.sh")
 
     if os.path.isdir(_STAGED_VENV):
-        bash(f"ln -s {_STAGED_VENV} {_workspace}/.venv")
+        bash(f"ln -s {_STAGED_VENV} {WORKSPACE}/.venv")
 
     if setup_command:
         bash(setup_command)
 
     if os.getuid() == 0:
-        bash(f"chown -R 1000:1000 {_workspace}")
+        bash(f"chown -R 1000:1000 {WORKSPACE}")
 
-    os.chdir(_workspace)
+    os.chdir(WORKSPACE)
 
 
 
@@ -252,9 +234,9 @@ def _apply_patches(patches: list[str] | None = None) -> None:
         return
 
     for i, patch_content in enumerate(patches):
-        patch_path = Path(_workspace) / f".patch_{i}"
+        patch_path = Path(WORKSPACE) / f".patch_{i}"
         patch_path.write_text(patch_content)
-        bash(f"cd {_workspace} && patch --no-backup -p1 < {patch_path} && rm {patch_path}")
+        bash(f"cd {WORKSPACE} && patch --no-backup -p1 < {patch_path} && rm {patch_path}")
 
 
 def _write_tmp_json(name: str, payload: dict[str, Any]) -> None:
@@ -306,7 +288,7 @@ async def audit_training_data(
     """Inject training-data contamination, then let the agent audit and clean it."""
     _setup_workspace(setup_command)
     bash(
-        f"python -m mutations data {contamination} {_workspace}"
+        f"python -m tasks.mutations data {contamination} {WORKSPACE}"
         f" --train-file {train_file} --val-file {val_file}"
         f" --noise-rate {noise_rate} --leak-rate {leak_rate}"
     )
@@ -327,7 +309,7 @@ async def audit_evaluation_signal(
     """Corrupt the visible evaluation signal and require the agent to audit it."""
     _setup_workspace(setup_command)
     bash(
-        f"python -m mutations eval {eval_mutation} {_workspace}"
+        f"python -m tasks.mutations eval {eval_mutation} {WORKSPACE}"
         f" --eval-file {eval_file} --train-file {train_file}"
         f" --leak-rate {leak_rate}"
     )
@@ -393,7 +375,7 @@ async def adapt_without_forgetting(
     """Stage a base checkpoint and require adaptation to new data without forgetting."""
     _setup_workspace(setup_command)
     for rel_path in forbidden_train_files or []:
-        forbidden_path = Path(_workspace) / rel_path
+        forbidden_path = Path(WORKSPACE) / rel_path
         if forbidden_path.exists():
             forbidden_path.unlink()
     yield prompt

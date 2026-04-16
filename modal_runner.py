@@ -2,25 +2,24 @@
 
 Deploy once, then spawn isolated agent runs:
 
-    modal deploy modal_devbox.py
+    modal deploy modal_runner.py
 
     # Single task
-    modal run modal_devbox.py --task emb_finetune
+    modal run modal_runner.py --task emb_finetune
 
     # Multiple tasks in parallel (each gets its own container)
-    modal run modal_devbox.py --tasks emb_finetune,emb_debug_loss,vlm_finetune
+    modal run modal_runner.py --tasks emb_finetune,emb_debug_loss,vlm_finetune
 
     # All tasks, 3 repeats each
-    modal run modal_devbox.py --all --repeats 3 --model claude-sonnet-4-6 --max-steps 100
+    modal run modal_runner.py --all --repeats 3 --model claude-sonnet-4-6 --max-steps 100
 
     # Run GPU tests
-    modal run modal_devbox.py --test
-    modal run modal_devbox.py --test --test-filter emb
+    modal run modal_runner.py --test
+    modal run modal_runner.py --test --test-filter emb
 
 Setup:
     pip install modal
     modal setup
-    modal secret create lib-github-pat LIB_GITHUB_PAT=<pat>
     modal secret create hud-keys HUD_API_KEY=<key>
 """
 
@@ -32,18 +31,12 @@ import modal
 APP_NAME = "ml-training-dev"
 app = modal.App(APP_NAME)
 
-lib_pat_secret = modal.Secret.from_name(
-    "lib-github-pat", required_keys=["LIB_GITHUB_PAT"]
-)
-
 image = (
     modal.Image.from_dockerfile(
         "Dockerfile.hud",
-        secrets=[lib_pat_secret],
         build_args={"HUD_RUNTIME": "0"},
     )
     .add_local_dir("tasks", remote_path="/mcp_server/tasks")
-    .add_local_file("local_test.py", remote_path="/mcp_server/local_test.py")
 )
 
 SRC = "/mcp_server"
@@ -62,69 +55,94 @@ def _deployed_function(name: str):
     return modal.Function.from_name(APP_NAME, name)
 
 
+def _fetch_taskset_info(taskset_name: str) -> tuple[str, dict[str, str]]:
+    """Fetch taskset by name. Returns (taskset_uuid, slug -> task_version_id mapping)."""
+    import httpx
+    from hud.settings import settings
+
+    headers = {}
+    if settings.api_key:
+        headers["Authorization"] = f"Bearer {settings.api_key}"
+
+    with httpx.Client(timeout=15) as client:
+        resp = client.get(
+            f"{settings.hud_api_url}/tasks/evalset/{taskset_name}",
+            headers=headers,
+            params={"all": "true"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    taskset_id = data.get("evalset_id") or ""
+    slug_to_id: dict[str, str] = {}
+    for task_data in (data.get("tasks") or {}).values():
+        if not isinstance(task_data, dict):
+            continue
+        slug = task_data.get("slug") or task_data.get("external_id") or ""
+        task_version_id = task_data.get("id") or ""
+        if slug and task_version_id:
+            slug_to_id[slug] = task_version_id
+    return taskset_id, slug_to_id
+
+
 @app.function(
     image=image,
     gpu="H100",
     timeout=86400,
     secrets=[modal.Secret.from_name("hud-keys", required_keys=["HUD_API_KEY"])],
 )
-def run_agent(
-    task: str,
+async def run_agent(
+    task_name: str,
     model: str = "claude-opus-4-6",
     max_steps: int = 500,
     job_id: str = "",
     taskset: str = "",
 ):
     """Run an agent against a specific task. Each invocation gets an isolated container."""
-    import subprocess
+    import importlib
+    import sys
+
+    os.environ.setdefault("MCP_TESTING_MODE", "1")
 
     import env
+    import hud
+    from env import AGENT_CONFIG
+    from hud.agents import create_agent
 
-    env._setup_workspace()
+    env.init_tools()
 
-    cmd = [
-        "python",
-        f"{SRC}/local_test.py",
-        "--task",
-        task,
-        "--model",
-        model,
-        "--max-steps",
-        str(max_steps),
-    ]
-    if job_id:
-        cmd.extend(["--job-id", job_id])
+    sys.path.insert(0, str(pathlib.Path(SRC) / "tasks" / task_name))
+    if "task" in sys.modules:
+        del sys.modules["task"]
+    task = importlib.import_module("task").task
+    sys.path.pop(0)
+
+    task.metadata["trace_name"] = task_name
+    task.agent_config = AGENT_CONFIG
+
+    # Resolve taskset
+    taskset_id: str | None = None
     if taskset:
-        cmd.extend(["--taskset", taskset])
+        try:
+            taskset_id, slug_map = _fetch_taskset_info(taskset)
+            if task.slug:
+                task_version_id = slug_map.get(task.slug)
+                if task_version_id:
+                    task.id = task_version_id
+        except Exception as e:
+            print(f"Warning: could not fetch taskset: {e}")
 
-    print(f"=== Running agent: task={task}, model={model}, max_steps={max_steps} ===")
-    subprocess.run(
-        cmd,
-        cwd=WS,
-        env={**os.environ, "PYTHONPATH": f"{WS}:{SRC}", "MCP_TESTING_MODE": "1"},
-    )
-
-
-@app.function(
-    image=image,
-    gpu="H100",
-    timeout=86400,
-    secrets=[modal.Secret.from_name("hud-keys", required_keys=["HUD_API_KEY"])],
-)
-def run_calibration(model: str = "claude-sonnet-4-6"):
-    """Start dev server with CalibrationTool for each task. Connect from Cursor / Claude Code."""
-    import asyncio
-
-    import env
-
-    env.init_tools(WS)
-
-    from tasks.calibration.calibrate import register_calibration_tools
-
-    registered = register_calibration_tools(model=model)
-    print(f"Registered calibration tools: {registered}")
-
-    asyncio.run(env.env.run())
+    print(f"=== {task_name} ({model}) ===")
+    eval_kwargs: dict = {"name": task_name}
+    if job_id:
+        eval_kwargs["job_id"] = job_id
+    if taskset_id:
+        eval_kwargs["taskset_id"] = taskset_id
+    async with hud.eval(task, **eval_kwargs) as ctx:
+        agent = create_agent(model)
+        agent.system_prompt = AGENT_CONFIG["system_prompt"]
+        await agent.run(ctx, max_steps=max_steps)
+        print(f"Reward: {ctx.reward}")
 
 
 @app.function(
@@ -204,8 +222,6 @@ def main(
     test_filter: str = "",
     job_id: str = "",
     taskset: str = "",
-    calibrate: bool = False,
-    calibrate_model: str = "claude-sonnet-4-6",
     eval_checkpoint: str = "",
     eval_benchmarks: str = "SciFact,NQ",
     eval_local: str = "",
@@ -213,24 +229,16 @@ def main(
     """Spawn agent runs, GPU tests, or calibration server.
 
     Usage:
-        modal run modal_devbox.py --task emb_finetune
-        modal run modal_devbox.py --tasks emb_finetune,emb_debug_loss,vlm_finetune
-        modal run modal_devbox.py --all --repeats 3 --model claude-sonnet-4-6 --max-steps 100
-        modal run modal_devbox.py --task emb_finetune --taskset claire-tasks
+        modal run modal_runner.py --task emb_finetune
+        modal run modal_runner.py --tasks emb_finetune,emb_debug_loss,vlm_finetune
+        modal run modal_runner.py --all --repeats 3 --model claude-sonnet-4-6 --max-steps 100
+        modal run modal_runner.py --task emb_finetune --taskset claire-tasks
 
-        modal run modal_devbox.py --test
-        modal run modal_devbox.py --test --test-filter emb
-
-        modal run modal_devbox.py --calibrate
-        modal run modal_devbox.py --calibrate --calibrate-model claude-sonnet-4-6
+        modal run modal_runner.py --test
+        modal run modal_runner.py --test --test-filter emb
     """
     import asyncio
     import uuid
-
-    if calibrate:
-        print(f"Starting calibration server (eval model: {calibrate_model})...")
-        _deployed_function("run_calibration").remote(model=calibrate_model)
-        return
 
     if eval_checkpoint:
         print(f"Evaluating {eval_checkpoint} on MTEB: {eval_benchmarks}, local: {eval_local}")
@@ -282,7 +290,7 @@ def main(
         print(f"HUD job: https://hud.ai/jobs/{job_id}")
     run_agent_fn = _deployed_function("run_agent")
     handles = [
-        run_agent_fn.spawn(task=t, model=model, max_steps=max_steps, job_id=job_id, taskset=taskset)
+        run_agent_fn.spawn(task_name=t, model=model, max_steps=max_steps, job_id=job_id, taskset=taskset)
         for t in expanded
     ]
     for handle in handles:
@@ -321,8 +329,6 @@ if __name__ == "__main__":
     parser.add_argument("--test-filter", default="")
     parser.add_argument("--job-id", default="")
     parser.add_argument("--taskset", default="", help="HUD taskset name to associate traces with")
-    parser.add_argument("--calibrate", action="store_true")
-    parser.add_argument("--calibrate-model", default="claude-sonnet-4-6")
     parser.add_argument("--eval-checkpoint", default="", help="Evaluate a checkpoint (e.g. checkpoints/scifact_base)")
     parser.add_argument("--eval-benchmarks", default="SciFact,NQ", help="Comma-separated MTEB tasks")
     parser.add_argument("--eval-local", default="", help="Comma-separated local eval files (e.g. data/val.jsonl,data/nq_val.jsonl)")
