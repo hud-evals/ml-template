@@ -38,24 +38,21 @@ COPY ./pyproject.toml /mcp_server/pyproject.toml
 WORKDIR /mcp_server
 
 ENV RUST_LOG=warn
-RUN --mount=type=secret,id=LIB_GITHUB_PAT \
-    LIB_GITHUB_PAT="${LIB_GITHUB_PAT:-$(cat /run/secrets/LIB_GITHUB_PAT 2>/dev/null || echo '')}" && \
-    git config --global url."https://${LIB_GITHUB_PAT}@github.com/".insteadOf "https://github.com/" && \
-    uv venv --relocatable /opt/venv && \
-    UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --no-install-project && \
-    (git config --global --remove-section "url.https://${LIB_GITHUB_PAT}@github.com/" || true)
+RUN uv venv --relocatable /opt/venv && \
+    UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --no-install-project
 
 ENV PYTHONPATH=/home/ubuntu/workspace
 ENV PATH=/home/ubuntu/workspace/.venv/bin:/opt/venv/bin:/home/ubuntu/.local/bin:$PATH
 ENV HF_HOME=/home/ubuntu/.cache/huggingface
 
 # Source code only — assets are downloaded at scenario setup time.
-COPY ./scripts/ /mcp_server/scripts/
 COPY ./env.py /mcp_server/env.py
 COPY ./run_train.sh /mcp_server/run_train.sh
 COPY ./torchtitan/ /mcp_server/torchtitan/
 COPY ./tests/ /mcp_server/tests/
-COPY ./tasks/ /mcp_server/tasks/
+COPY ./scripts/ /mcp_server/scripts/
+COPY ./tasks/mutations/ /mcp_server/tasks/mutations/
+COPY ./tasks/utils/ /mcp_server/tasks/utils/
 
 RUN chmod 700 /mcp_server
 

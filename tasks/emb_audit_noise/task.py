@@ -16,6 +16,6 @@ task = audit_training_data.task(
     ],
     contamination="label_noise",
     noise_rate=0.3,
-    setup_command=f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact",
+    setup_command=f"python /mcp_server/setup/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact",
 )
 task.slug = "emb_audit_noise"

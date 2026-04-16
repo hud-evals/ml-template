@@ -1,19 +1,34 @@
 """ML training environment -- torchtitan experiments."""
 
-import glob
 import json
 import logging
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
-from sdlc import BashGrader, CodingEnvironment, Grade, bash
-from sdlc.mcp.coding import CodingService
+from hud import Environment
+from hud.native.graders import BashGrader, Grade
 
 
 logger = logging.getLogger(__name__)
 MCP_TESTING_MODE = os.environ.get("MCP_TESTING_MODE") in ["1", "true"]
+
+
+def bash(cmd: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    logger.info("bash: %s", cmd)
+    result = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        logger.warning(
+            "bash exited %d\nstdout: %s\nstderr: %s",
+            result.returncode,
+            result.stdout[-3000:] if result.stdout else "(empty)",
+            result.stderr[-3000:] if result.stderr else "(empty)",
+        )
+        if check:
+            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+    return result
 
 _REPO_ROOT = Path(__file__).parent
 
@@ -34,7 +49,7 @@ import sys
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-env = CodingEnvironment("coding")
+env = Environment("ml-template-1")
 
 AGENT_CONFIG = {
     "system_prompt": (
@@ -83,9 +98,24 @@ def init_tools(workspace: str | None = None):
 
     import asyncio as _aio
 
-    from hud.tools.coding.bash import ClaudeBashSession
-    from hud.tools.coding.shell import ShellTool
+    from hud.tools.coding import (
+        ApplyPatchTool,
+        BashTool,
+        ClaudeBashSession,
+        EditTool,
+        GeminiEditTool,
+        GeminiShellTool,
+        GeminiWriteTool,
+        ShellTool,
+    )
     from hud.tools.coding.utils import get_demote_preexec_fn
+    from hud.tools.filesystem import (
+        GeminiGlobTool,
+        GeminiListTool,
+        GeminiReadManyTool,
+        GeminiReadTool,
+        GeminiSearchTool,
+    )
 
     ws = workspace or _workspace
 
@@ -130,17 +160,32 @@ def init_tools(workspace: str | None = None):
                 f'tail() {{ _check_path "$@" && command tail "$@"; }}'
             )
 
-    coding_service = CodingService()
-    coding_service.bash_tool.session = _SandboxedSession()
-    ShellTool(cwd=ws).register(coding_service.server)
-    env.connect_server(coding_service.server)
+    # Claude tools
+    bash_tool = BashTool()
+    bash_tool.session = _SandboxedSession()
+    bash_tool.register(env)
+    EditTool().register(env)
+
+    # OpenAI tools
+    ShellTool(cwd=ws).register(env)
+    ApplyPatchTool().register(env)
+
+    # Gemini tools
+    GeminiShellTool(base_directory=ws).register(env)
+    GeminiEditTool(base_directory=ws).register(env)
+    GeminiWriteTool(base_directory=ws).register(env)
+    GeminiReadTool(base_path=ws).register(env)
+    GeminiSearchTool(base_path=ws).register(env)
+    GeminiGlobTool(base_path=ws).register(env)
+    GeminiListTool(base_path=ws).register(env)
+    GeminiReadManyTool(base_path=ws).register(env)
 
 
 init_tools()
 
 
-def _grade(graders: list[dict[str, Any]]):
-    """Build a Grade from a list of grader dicts.
+async def _grade(graders: list[dict[str, Any]]):
+    """Build an EvaluationResult from a list of grader dicts.
 
     Each grader is either:
       - script-based: {name, script, args?, weight?, timeout?}
@@ -158,12 +203,12 @@ def _grade(graders: list[dict[str, Any]]):
             Path(f"/tmp/{stem}.py").write_text(script)
             g.setdefault("command", f"python /tmp/{stem}.py {args}")
     total = sum(g.get("weight", 1) for g in graders)
-    return Grade.from_subscores([
+    return await Grade.gather(*[
         BashGrader.grade(
             name=g.get("name"),
             weight=g.get("weight", 1) / total,
             command=g["command"],
-            timeout=g.get("timeout", 10),
+            timeout_seconds=g.get("timeout", 10),
         )
         for g in graders
     ])
@@ -230,7 +275,7 @@ async def train_to_target(
     """Train forward from a clean or staged workspace."""
     _setup_workspace(setup_command)
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="repair_degraded_recipe")
@@ -244,7 +289,7 @@ async def repair_degraded_recipe(
     _setup_workspace(setup_command)
     _apply_patches(patches)
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="audit_training_data")
@@ -266,7 +311,7 @@ async def audit_training_data(
         f" --noise-rate {noise_rate} --leak-rate {leak_rate}"
     )
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="audit_evaluation_signal")
@@ -287,7 +332,7 @@ async def audit_evaluation_signal(
         f" --leak-rate {leak_rate}"
     )
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="compose_multi_stage_pipeline")
@@ -302,7 +347,7 @@ async def compose_multi_stage_pipeline(
     if expected_stages is not None:
         _write_tmp_json("pipeline_spec", {"expected_stages": expected_stages})
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="certify_reliability")
@@ -318,7 +363,7 @@ async def certify_reliability(
     _apply_patches(patches)
     _write_tmp_json("reliability_spec", {"matrix": reliability_matrix})
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="optimize_under_constraints")
@@ -332,7 +377,7 @@ async def optimize_under_constraints(
     _setup_workspace(setup_command)
     _write_tmp_json("constraint_spec", constraints)
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="adapt_without_forgetting")
@@ -352,7 +397,7 @@ async def adapt_without_forgetting(
         if forbidden_path.exists():
             forbidden_path.unlink()
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="targeted_failure_recovery")
@@ -362,10 +407,10 @@ async def targeted_failure_recovery(
     failure_manifest: dict[str, Any] | None = None,
     setup_command: str | None = None,
 ):
-    """Stage failing artifacts or subsets and require targeted recovery."""
+    """Stage failing artifacts or subsets and require targeted recovery ig."""
     _setup_workspace(setup_command)
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 @env.scenario(name="restore_reference_parity")
@@ -381,7 +426,7 @@ async def restore_reference_parity(
     _apply_patches(patches)
     _write_tmp_json("reference_spec", reference_spec)
     yield prompt
-    yield _grade(graders)
+    yield await _grade(graders)
 
 
 SCENARIOS = {
@@ -389,16 +434,3 @@ SCENARIOS = {
     for name, value in globals().items()
     if not name.startswith("_") and hasattr(value, "task")
 }
-
-
-def _register_tasks():
-    if not hasattr(env, "register_task"):
-        return
-    try:
-        from tasks import tasks, task_ids
-    except ImportError:
-        return
-    for name, task in tasks.items():
-        env.register_task(task_ids.get(name, name), task)
-
-_register_tasks()

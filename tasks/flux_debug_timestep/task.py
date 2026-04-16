@@ -25,6 +25,6 @@ task = repair_degraded_recipe.task(
         ),
     ],
     patches=load_patches(__file__),
-    setup_command=f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --data-files pixparse/cc12m-wds cc12m-train-0000.tar cc12m-train-0001.tar cc12m-train-0002.tar",
+    setup_command=f"python /mcp_server/setup/setup_fixtures.py {W} --data-files pixparse/cc12m-wds cc12m-train-0000.tar cc12m-train-0001.tar cc12m-train-0002.tar",
 )
 task.slug = "flux_debug_timestep"

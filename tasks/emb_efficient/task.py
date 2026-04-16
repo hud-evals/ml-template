@@ -19,6 +19,6 @@ task = optimize_under_constraints.task(
         grader("check_threshold", name="ndcg@10>=0.85", args=f".emb_eval.json ndcg@10 0.85 {W}", weight=0.20),
     ],
     constraints={"max_total_steps": 200},
-    setup_command=f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact",
+    setup_command=f"python /mcp_server/setup/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact",
 )
 task.slug = "emb_efficient"

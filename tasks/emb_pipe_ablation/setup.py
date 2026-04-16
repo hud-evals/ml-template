@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.environ.get("SRC_DIR", "/mcp_server"))
-from tasks.utils.setup_fixtures import train, _write_json
+from setup.setup_fixtures import train, _write_json
 
 
 def main(ws: str) -> None:

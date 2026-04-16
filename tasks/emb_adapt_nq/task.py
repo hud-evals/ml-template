@@ -26,6 +26,6 @@ task = adapt_without_forgetting.task(
     adapt_train_files=["data/nq.jsonl"],
     retain_eval_files=["data/val.jsonl", "data/nq_val.jsonl"],
     forbidden_train_files=["data/scifact.jsonl"],
-    setup_command=f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact nq --checkpoints scifact_base",
+    setup_command=f"python /mcp_server/setup/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact nq --checkpoints scifact_base",
 )
 task.slug = "emb_adapt_nq"

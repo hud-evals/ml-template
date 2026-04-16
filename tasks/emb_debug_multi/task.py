@@ -13,6 +13,6 @@ task = repair_degraded_recipe.task(
         grader("check_threshold", name="ndcg@10>=0.30", args=f".emb_eval.json ndcg@10 0.30 {W}", weight=0.20),
     ],
     patches=load_patches(__file__),
-    setup_command=f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact synthetic",
+    setup_command=f"python /mcp_server/setup/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact synthetic",
 )
 task.slug = "emb_debug_multi"

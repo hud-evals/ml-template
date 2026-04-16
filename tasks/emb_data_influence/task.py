@@ -50,7 +50,7 @@ task = targeted_failure_recovery.task(
         ],
     },
     setup_command=(
-        f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact && "
+        f"python /mcp_server/setup/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact && "
         f"python /mcp_server/tasks/emb_data_influence/setup.py {W}"
     ),
 )
