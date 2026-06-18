@@ -2,6 +2,11 @@
 
 HUD evaluation environment for ML training tasks. 10 tasks across embedding retrieval, VLM, Flux diffusion, and MoE language models. All run on 1x H100 80GB via [pytorch/torchtitan](https://github.com/pytorch/torchtitan).
 
+> **HUD v6.** This environment targets the v6 SDK (`hud-python @ v6`). Tasks are
+> served with `hud.eval` (`Task` + `LocalRuntime`/`Workspace`), and the env can
+> be driven three ways: locally, directly on Modal, or **dispatched through the
+> HUD platform** onto Modal (see [Running through the HUD platform](#running-through-the-hud-platform-modal-runtime)).
+
 ## Setup
 
 ```bash
@@ -48,6 +53,40 @@ uv run python modal_runner.py --test --test-filter emb
 hud deploy .
 hud sync tasks <taskset-name>
 ```
+
+## Running through the HUD platform (Modal runtime)
+
+The same env can be driven by the **HUD control plane** instead of being launched
+by hand — so a rollout is scheduled, dispatched, and logged on the platform just
+like an EC2 run, but executes on Modal.
+
+This is the `run_rollout_dispatched` function in `modal_runner.py`. It is the
+Modal twin of an EC2 `hud-daemon` run:
+
+- The control plane provisions the rollout onto Modal (a registry whose
+  `instance_config.sandbox_provider = "modal"` points at this app + function).
+- It hands over the **same `runner_config`** the EC2 daemon receives, plus the
+  platform identities to report back to (`api_url` / `api_key` / `gateway_url` /
+  `telemetry_url`).
+- The function serves `env.py` in‑process with `LocalRuntime` (this container
+  *is* the env image), runs the agent, and reports the trace
+  (`/enter … /exit`) under the platform‑assigned `trace_id`.
+
+```
+HUD platform  ──(provision)──►  run_rollout_dispatched (Modal, H100)
+                                   • Task(env, id, args) + agent from runner_config
+                                   • rollout(..., runtime=LocalRuntime("env.py"))
+                                   • reports trace status + reward back to the platform
+```
+
+Deploy it the same way as the rest of the app:
+
+```bash
+uv run modal deploy modal_runner.py   # publishes run_rollout_dispatched alongside run_agent/run_eval
+```
+
+The control‑plane side of this wiring (the `sandbox_provider="modal"` dispatch
+seam) lives in the `hud-monorepo` control plane.
 
 ## Architecture
 
