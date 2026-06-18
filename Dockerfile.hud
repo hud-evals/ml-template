@@ -5,6 +5,7 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS setup
 RUN apt-get update -y \
   && apt-get install -y --no-install-recommends \
   bash \
+  bubblewrap \
   build-essential \
   ca-certificates \
   curl \
@@ -57,6 +58,8 @@ COPY ./tasks/utils/ /mcp_server/tasks/utils/
 
 RUN chmod 700 /mcp_server
 
-ARG HUD_RUNTIME="1"
-ENV _HUD_DEV_CHILD=${HUD_RUNTIME}
-CMD ["hud", "dev", "env:env", "--port", "8080"]
+# v6 serves an Environment from source over a control channel. With the Modal
+# runner this CMD is unused (LocalRuntime spawns its own server child), but it
+# keeps the image directly servable via `docker run` / DockerRuntime.
+CMD ["python", "-m", "hud.environment.server", "/mcp_server/env.py", \
+     "--env", "ml-template-1", "--host", "0.0.0.0", "--port", "8765"]

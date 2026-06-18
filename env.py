@@ -1,16 +1,38 @@
-"""ML training environment -- torchtitan experiments."""
+"""ML training environment -- torchtitan experiments (HUD v6).
+
+Ported from the v5 SDK (tools + scenarios) to the v6 SDK (capabilities + task
+templates):
+
+* ``@env.scenario`` -> ``@env.template`` (generator body is unchanged:
+  ``yield prompt`` then ``yield <reward>``).
+* The hand-rolled coding tools + ``_SandboxedSession`` (which chmod-locked
+  ``/mcp_server`` and overrode shell builtins) are replaced by a single
+  ``env.workspace(...)`` capability: a bwrap-isolated SSH shell. The agent
+  harness brings its own bash/editor tools over that SSH channel. bwrap
+  isolation hides ``/mcp_server`` (source, graders, patches) for free -- only
+  the workspace directory is mounted inside the sandbox.
+* The GPU is exposed inside the sandbox by binding the real ``/dev`` with
+  bwrap's ``--dev-bind`` (registered below as the ``devbind`` mount kind);
+  the relocatable ``/opt/venv`` and CUDA user-space libs (``/usr``) are
+  mounted read-only so ``torch`` sees CUDA.
+* Graders run host-side (outside the sandbox) via ``hud.graders.BashGrader``
+  with ``cwd=WORKSPACE``; ``combine`` replaces ``Grade.gather`` and normalizes
+  the per-grader weights.
+"""
 
 import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from hud import Environment
-from hud.native.graders import BashGrader, Grade
-
+from hud.environment import workspace as _ws_mod
+from hud.environment.workspace import DEFAULT_SYSTEM_MOUNTS, Mount
+from hud.graders import BashGrader, combine
 
 logger = logging.getLogger(__name__)
 MCP_TESTING_MODE = os.environ.get("MCP_TESTING_MODE") in ["1", "true"]
@@ -30,14 +52,17 @@ def bash(cmd: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
             raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
     return result
 
-SRC_DIR = "/mcp_server"
-WORKSPACE = "/home/ubuntu/workspace"
 
-import sys
+# Locations are overridable so the same env serves both the Modal/Docker image
+# (the defaults) and ad-hoc local runs.
+SRC_DIR = os.environ.get("HUD_SRC_DIR", "/mcp_server")
+WORKSPACE = os.environ.get("HUD_WORKSPACE", "/home/ubuntu/workspace")
+STAGED_VENV = os.environ.get("HUD_VENV", "/opt/venv")
+
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-env = Environment("ml-template-1")
+env = Environment(name="ml-template-1")
 
 AGENT_CONFIG = {
     "system_prompt": (
@@ -45,7 +70,6 @@ AGENT_CONFIG = {
         "Environment:\n"
         "  Workspace: /home/ubuntu/workspace (your shell starts here)\n"
         "  Framework source: /home/ubuntu/workspace/torchtitan  (editable)\n"
-        "  No network access.\n"
         "  Pre-staged data and assets: /home/ubuntu/workspace/data/, /home/ubuntu/workspace/assets/\n\n"
         "Running experiments:\n"
         "  Standard models train via run_train.sh (wraps torchrun -m torchtitan.train):\n"
@@ -59,155 +83,165 @@ AGENT_CONFIG = {
     ),
 }
 
-_tools_initialized = False
+
+# ===========================================================================
+# Workspace capability (bwrap-isolated SSH shell with GPU access)
+# ===========================================================================
+
+# bwrap's ``--bind /dev /dev`` exposes the device *nodes* but they cannot be
+# opened from inside a user namespace; ``--dev-bind`` is the variant that
+# grants device access. The v6 ``Workspace`` mount kinds don't expose it, so
+# register it here as ``devbind`` (kind -> (flag, try-flag, takes-src)).
+if "devbind" not in _ws_mod._MOUNT_FLAGS:
+    _ws_mod._MOUNT_FLAGS["devbind"] = ("--dev-bind", "--dev-bind-try", True)
 
 
-def init_tools():
-    """Initialize coding tools with workspace sandboxing."""
-    global _tools_initialized
-    if _tools_initialized:
+def _gpu_system_mounts() -> tuple[Mount, ...]:
+    """Default system mounts, but with the minimal ``--dev`` swapped for a real
+    ``--dev-bind /dev /dev`` so the NVIDIA device nodes are usable."""
+    return tuple(
+        Mount("devbind", src="/dev", dst="/dev") if m.kind == "dev" else m
+        for m in DEFAULT_SYSTEM_MOUNTS
+    )
+
+
+def _workspace_mounts() -> list[Mount]:
+    """Read-only mounts visible inside the sandbox (the Python venv)."""
+    mounts: list[Mount] = []
+    if os.path.isdir(STAGED_VENV):
+        mounts.append(Mount("ro", src=STAGED_VENV, dst=STAGED_VENV))
+    return mounts
+
+
+# One workspace per env: an SSH shell the agent drives. ``guest_path=WORKSPACE``
+# mounts the root at its real path inside the sandbox so the agent's paths and
+# the host-side grader paths coincide. ``network=True`` keeps the host net
+# namespace so torchrun's localhost rendezvous works.
+workspace = env.workspace(
+    WORKSPACE,
+    network=True,
+    guest_path=WORKSPACE,
+    system_mounts=_gpu_system_mounts(),
+    mounts=_workspace_mounts(),
+    env={
+        "PATH": f"{STAGED_VENV}/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin",
+        "PYTHONPATH": WORKSPACE,
+        "HOME": WORKSPACE,
+        "HF_HOME": f"{WORKSPACE}/.cache/huggingface",
+    },
+)
+
+
+@env.initialize
+async def _probe_bwrap() -> None:
+    """Disable bwrap isolation if it can't actually run here.
+
+    ``Workspace`` uses bwrap whenever the binary is on PATH, but some container
+    runtimes ship it while forbidding the user namespace / device bind it needs
+    (every SSH command would then fail with no fallback). Probe the real
+    configuration once; on failure, drop to an unisolated host shell so the
+    environment still runs (the agent loses the ``/mcp_server`` boundary, which
+    is logged loudly).
+    """
+    import asyncio
+
+    if workspace._bwrap is None:
         return
-
-    # Lock down /mcp_server so the agent can't read source, graders, or patches.
-    # Done at runtime (not just Dockerfile) because Modal adds files after build.
-    if os.getuid() == 0:
-        if os.path.isdir("/mcp_server"):
-            os.system(
-                "find /mcp_server -maxdepth 0 -exec chmod 700 {} + && "
-                "find /mcp_server -mindepth 1 -maxdepth 1 "
-                "! -name assets ! -name data "
-                "-exec chmod -R 700 {} +"
-            )
-        os.system("chmod -R 700 /tmp/.grader_* 2>/dev/null || true")
-        os.system("mount -o remount,hidepid=2 /proc 2>/dev/null || true")
-    _tools_initialized = True
-
-    import asyncio as _aio
-
-    from hud.tools.coding import (
-        ApplyPatchTool,
-        BashTool,
-        ClaudeBashSession,
-        EditTool,
-        GeminiEditTool,
-        GeminiShellTool,
-        GeminiWriteTool,
-        ShellTool,
-    )
-    from hud.tools.coding.utils import get_demote_preexec_fn
-    from hud.tools.filesystem import (
-        GeminiGlobTool,
-        GeminiListTool,
-        GeminiReadManyTool,
-        GeminiReadTool,
-        GeminiSearchTool,
-    )
-
-    ws = WORKSPACE
-
-    class _SandboxedSession(ClaudeBashSession):
-        """Bash session locked to the workspace directory."""
-
-        async def start(self):
-            if self._started:
-                await _aio.sleep(0)
-                return
-            self._process = await _aio.create_subprocess_shell(
-                self.command,
-                stdin=_aio.subprocess.PIPE,
-                stdout=_aio.subprocess.PIPE,
-                stderr=_aio.subprocess.PIPE,
-                cwd=ws,
-                preexec_fn=get_demote_preexec_fn(),
-            )
-            self._started = True
-            self._timed_out = False
-            await self.run(
-                f'export HOME="{ws}" && '
-                f'export PATH="{ws}/.venv/bin:/usr/bin:/bin" && '
-                f'export PYTHONPATH="{ws}" && '
-                f'_ws="{ws}" && '
-                f'cd() {{ local t="${{1:-.}}"; local r=$(realpath -m "$t" 2>/dev/null || echo "$t"); '
-                f'case "$r" in "$_ws"*) builtin cd "$t" ;; '
-                f'*) echo "Error: cannot navigate outside workspace" >&2; return 1 ;; esac; }} && '
-                f'ls() {{ for a in "$@"; do case "$a" in -*) ;; /*) '
-                f'case "$a" in "$_ws"*) ;; *) echo "Error: cannot list outside workspace" >&2; return 1 ;; esac ;; esac; done; '
-                f'command ls "$@"; }} && '
-                f'find() {{ case "$1" in "$_ws"*|.*) command find "$@" ;; '
-                f'*) echo "Error: cannot search outside workspace" >&2; return 1 ;; esac; }} && '
-                f'_check_path() {{ for a in "$@"; do case "$a" in -*|"") ;; /*) '
-                f'case "$a" in "$_ws"*|/dev/*|/proc/self/*) ;; *) echo "Error: cannot access outside workspace: $a" >&2; return 1 ;; esac ;; esac; done; return 0; }} && '
-                f'cat() {{ _check_path "$@" && command cat "$@"; }} && '
-                f'head() {{ _check_path "$@" && command head "$@"; }} && '
-                f'tail() {{ _check_path "$@" && command tail "$@"; }}'
-            )
-
-    # Claude tools
-    bash_tool = BashTool()
-    bash_tool.session = _SandboxedSession()
-    bash_tool.register(env)
-    EditTool().register(env)
-
-    # OpenAI tools
-    ShellTool(cwd=ws).register(env)
-    ApplyPatchTool().register(env)
-
-    # Gemini tools
-    GeminiShellTool(base_directory=ws).register(env)
-    GeminiEditTool(base_directory=ws).register(env)
-    GeminiWriteTool(base_directory=ws).register(env)
-    GeminiReadTool(base_path=ws).register(env)
-    GeminiSearchTool(base_path=ws).register(env)
-    GeminiGlobTool(base_path=ws).register(env)
-    GeminiListTool(base_path=ws).register(env)
-    GeminiReadManyTool(base_path=ws).register(env)
+    argv = [
+        workspace._bwrap,
+        "--unshare-user-try",
+        "--unshare-pid",
+        "--dev-bind", "/dev", "/dev",
+        "--ro-bind", "/usr", "/usr",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--", "bash", "-lc", "echo probe > /dev/null && nvidia-smi -L >/dev/null 2>&1 || true",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+        if proc.returncode != 0:
+            raise RuntimeError((stderr or b"").decode(errors="replace")[-500:] or "non-zero exit")
+    except Exception as exc:  # noqa: BLE001 - any failure means bwrap is unusable
+        logger.warning(
+            "bwrap is present but unusable here (%s); the workspace will run "
+            "WITHOUT isolation (/mcp_server is NOT hidden from the agent).",
+            exc,
+        )
+        workspace._bwrap = None
+    else:
+        logger.info("bwrap isolation active for the workspace shell.")
 
 
-init_tools()
+# ===========================================================================
+# Grading (host-side, outside the sandbox)
+# ===========================================================================
 
 
 async def _grade(graders: list[dict[str, Any]]):
-    """Build an EvaluationResult from a list of grader dicts.
+    """Build an ``EvaluationResult`` from a list of grader dicts.
 
     Each grader is either:
-      - script-based: {name, script, args?, weight?, timeout?}
-        Written to /tmp/{name}.py, command auto-built.
-      - command-based: {name, command, weight?, timeout?}
-        Runs as-is.
+      - script-based: {name, script, _script_stem?, args?, weight?, timeout?}
+        The script is written to /tmp/<stem>.py and the command auto-built.
+      - command-based: {name, command, weight?, timeout?}  (runs as-is)
+
+    Graders run host-side via ``BashGrader`` with ``cwd=WORKSPACE`` so they see
+    the agent's edits; ``combine`` normalizes the positive weights to sum to 1.
     """
     # Kill any leftover agent GPU processes so graders have full GPU access.
     os.system("pkill -9 -f torchrun 2>/dev/null; pkill -9 -f torchtitan.train 2>/dev/null; sleep 1")
+
+    subscores = []
     for g in graders:
         if "script" in g:
-            stem = g.pop("_script_stem", g["name"])
-            script = g.pop("script")
-            args = g.pop("args", "")
-            Path(f"/tmp/{stem}.py").write_text(script)
-            g.setdefault("command", f"python /tmp/{stem}.py {args}")
-    total = sum(g.get("weight", 1) for g in graders)
-    return await Grade.gather(*[
-        BashGrader.grade(
-            name=g.get("name"),
-            weight=g.get("weight", 1) / total,
-            command=g["command"],
-            timeout_seconds=g.get("timeout", 10),
+            stem = g.get("_script_stem", g["name"])
+            Path(f"/tmp/{stem}.py").write_text(g["script"])
+            command = g.get("command") or f"python /tmp/{stem}.py {g.get('args', '')}"
+        else:
+            command = g["command"]
+        subscores.append(
+            BashGrader.grade(
+                weight=g.get("weight", 1),
+                name=g.get("name"),
+                command=command,
+                cwd=WORKSPACE,
+                timeout_seconds=g.get("timeout", 10),
+            )
         )
-        for g in graders
-    ])
+    return await combine(*subscores)
 
 
-_STAGED_VENV = "/opt/venv"
+# ===========================================================================
+# Workspace seeding
+# ===========================================================================
 
 
-def _setup_workspace(setup_command: str | None = None):
-    """Set up workspace and optionally run a command to stage assets.
-
-    Copies torchtitan source, tests, the standard launcher script,
-    and a relocatable Python venv. Task-specific assets are downloaded
-    by the setup_command.
-    """
-    shutil.rmtree(WORKSPACE, ignore_errors=True)
+def _clean_workspace() -> None:
+    """Empty the workspace, preserving the SSH daemon's ``.hud`` credentials."""
     os.makedirs(WORKSPACE, exist_ok=True)
+    for entry in os.listdir(WORKSPACE):
+        if entry == ".hud":
+            continue
+        path = Path(WORKSPACE) / entry
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _setup_workspace(setup_command: str | None = None) -> None:
+    """Seed the workspace and optionally run a command to stage assets.
+
+    Copies torchtitan source, tests, and the standard launcher script, and
+    symlinks the relocatable venv. Task-specific assets are downloaded by the
+    setup_command. Runs host-side (full access), unlike the agent's shell.
+    """
+    _clean_workspace()
 
     bash(f"cp -r {SRC_DIR}/torchtitan {WORKSPACE}/torchtitan")
     bash(f"cp -r {SRC_DIR}/tests {WORKSPACE}/tests")
@@ -215,17 +249,13 @@ def _setup_workspace(setup_command: str | None = None):
         bash(f"cp {SRC_DIR}/run_train.sh {WORKSPACE}/run_train.sh")
         bash(f"chmod +x {WORKSPACE}/run_train.sh")
 
-    if os.path.isdir(_STAGED_VENV):
-        bash(f"ln -s {_STAGED_VENV} {WORKSPACE}/.venv")
+    if os.path.isdir(STAGED_VENV) and not os.path.lexists(f"{WORKSPACE}/.venv"):
+        bash(f"ln -s {STAGED_VENV} {WORKSPACE}/.venv")
 
     if setup_command:
         bash(setup_command)
 
-    if os.getuid() == 0:
-        bash(f"chown -R 1000:1000 {WORKSPACE}")
-
     os.chdir(WORKSPACE)
-
 
 
 def _apply_patches(patches: list[str] | None = None) -> None:
@@ -244,11 +274,11 @@ def _write_tmp_json(name: str, payload: dict[str, Any]) -> None:
 
 
 # ===========================================================================
-# Scenarios
+# Task templates
 # ===========================================================================
 
 
-@env.scenario(name="train_to_target")
+@env.template(id="train_to_target")
 async def train_to_target(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -260,7 +290,7 @@ async def train_to_target(
     yield await _grade(graders)
 
 
-@env.scenario(name="repair_degraded_recipe")
+@env.template(id="repair_degraded_recipe")
 async def repair_degraded_recipe(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -274,7 +304,7 @@ async def repair_degraded_recipe(
     yield await _grade(graders)
 
 
-@env.scenario(name="audit_training_data")
+@env.template(id="audit_training_data")
 async def audit_training_data(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -296,7 +326,7 @@ async def audit_training_data(
     yield await _grade(graders)
 
 
-@env.scenario(name="audit_evaluation_signal")
+@env.template(id="audit_evaluation_signal")
 async def audit_evaluation_signal(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -317,7 +347,7 @@ async def audit_evaluation_signal(
     yield await _grade(graders)
 
 
-@env.scenario(name="compose_multi_stage_pipeline")
+@env.template(id="compose_multi_stage_pipeline")
 async def compose_multi_stage_pipeline(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -332,7 +362,7 @@ async def compose_multi_stage_pipeline(
     yield await _grade(graders)
 
 
-@env.scenario(name="certify_reliability")
+@env.template(id="certify_reliability")
 async def certify_reliability(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -348,7 +378,7 @@ async def certify_reliability(
     yield await _grade(graders)
 
 
-@env.scenario(name="optimize_under_constraints")
+@env.template(id="optimize_under_constraints")
 async def optimize_under_constraints(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -362,7 +392,7 @@ async def optimize_under_constraints(
     yield await _grade(graders)
 
 
-@env.scenario(name="adapt_without_forgetting")
+@env.template(id="adapt_without_forgetting")
 async def adapt_without_forgetting(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -382,20 +412,20 @@ async def adapt_without_forgetting(
     yield await _grade(graders)
 
 
-@env.scenario(name="targeted_failure_recovery")
+@env.template(id="targeted_failure_recovery")
 async def targeted_failure_recovery(
     prompt: str,
     graders: list[dict[str, Any]],
     failure_manifest: dict[str, Any] | None = None,
     setup_command: str | None = None,
 ):
-    """Stage failing artifacts or subsets and require targeted recovery ig."""
+    """Stage failing artifacts or subsets and require targeted recovery."""
     _setup_workspace(setup_command)
     yield prompt
     yield await _grade(graders)
 
 
-@env.scenario(name="restore_reference_parity")
+@env.template(id="restore_reference_parity")
 async def restore_reference_parity(
     prompt: str,
     graders: list[dict[str, Any]],
@@ -414,5 +444,5 @@ async def restore_reference_parity(
 SCENARIOS = {
     name: value
     for name, value in globals().items()
-    if not name.startswith("_") and hasattr(value, "task")
+    if not name.startswith("_") and name in env.templates
 }

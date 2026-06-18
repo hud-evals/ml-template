@@ -2,7 +2,7 @@ from env import WORKSPACE as W, certify_reliability
 from tasks.graders import grader
 from tasks.utils import load_patches
 
-task = certify_reliability.task(
+task = certify_reliability(
     prompt=(
         "Run a deterministic seed sweep of GPT-OSS debugmodel on a single GPU. "
         "Use seeds 0, 42, 123, and 999, training each for a few steps with "

@@ -72,7 +72,7 @@ class TestTaskDiscovery:
 
     @pytest.mark.parametrize("slug", ALL_SLUGS)
     def test_has_scenario(self, slug: str):
-        assert _discovered[slug].scenario in SCENARIOS
+        assert _discovered[slug].id in SCENARIOS
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ class TestGraderIntegrity:
 
 
 def _slugs_for_scenario(name: str) -> list[str]:
-    return [s for s in ALL_SLUGS if _discovered[s].scenario == name]
+    return [s for s in ALL_SLUGS if _discovered[s].id == name]
 
 
 def _repair_slugs():

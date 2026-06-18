@@ -2,7 +2,7 @@ from env import WORKSPACE as W, repair_degraded_recipe
 from tasks.graders import grader
 from tasks.utils import load_patches
 
-task = repair_degraded_recipe.task(
+task = repair_degraded_recipe(
     prompt=(
         "Train a Flux diffusion model that converges well on CC12M data.\n"
         "After training, verify the model can denoise properly by checking "
@@ -25,6 +25,6 @@ task = repair_degraded_recipe.task(
         ),
     ],
     patches=load_patches(__file__),
-    setup_command=f"python /mcp_server/setup/setup_fixtures.py {W} --data-files pixparse/cc12m-wds cc12m-train-0000.tar cc12m-train-0001.tar cc12m-train-0002.tar",
+    setup_command=f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --data-files pixparse/cc12m-wds cc12m-train-0000.tar cc12m-train-0001.tar cc12m-train-0002.tar",
 )
 task.slug = "flux_debug_timestep"
