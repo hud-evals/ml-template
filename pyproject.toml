@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     # HUD
-    "hud-python>=0.6.4",
+    "hud-python @ git+https://github.com/hud-evals/hud-python.git@main",
     # torchtitan core
     "torch>=2.2.0",
     "torchdata>=0.8.0",
