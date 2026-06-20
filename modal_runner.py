@@ -115,12 +115,12 @@ def _load_task(task_name: str):
         sys.path.pop(0)
 
 
-# Use production HUD endpoints by default. ``setdefault`` lets the Modal secret
-# or environment override them if ever needed.
-HUD_PROD_URLS = {
-    "HUD_API_URL": "https://api.hud.ai",
-    "HUD_GATEWAY_URL": "https://inference.hud.ai",
-    "HUD_TELEMETRY_URL": "https://telemetry.hud.ai/v3/api",
+# Use beta HUD endpoints by default. ``setdefault`` lets the Modal secret or
+# environment override them if ever needed.
+HUD_DEFAULT_URLS = {
+    "HUD_API_URL": "https://api.beta.hud.ai",
+    "HUD_GATEWAY_URL": "https://inference.beta.hud.ai",
+    "HUD_TELEMETRY_URL": "https://telemetry.beta.hud.ai/v3/api",
     "HUD_WEB_URL": "https://hud.ai",
 }
 
@@ -138,8 +138,8 @@ async def run_agent(
 ) -> float:
     """Run an agent against a task in an isolated container; return the reward."""
     os.environ.setdefault("MCP_TESTING_MODE", "1")
-    # Must run before the first ``hud`` import so production endpoints are used.
-    for key, value in HUD_PROD_URLS.items():
+    # Must run before the first ``hud`` import so the intended endpoints are used.
+    for key, value in HUD_DEFAULT_URLS.items():
         os.environ.setdefault(key, value)
 
     from hud.eval.runtime import LocalRuntime
