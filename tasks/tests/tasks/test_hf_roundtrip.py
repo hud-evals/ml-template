@@ -23,7 +23,7 @@ class TestHFRoundtrip:
         """Train with last_save_in_hf, then load that checkpoint for a second training run."""
         import env
         env._setup_workspace()
-        ws = env._workspace
+        ws = env.WORKSPACE
 
         # Step 1: Train 5 steps with last_save_in_hf
         result = subprocess.run(

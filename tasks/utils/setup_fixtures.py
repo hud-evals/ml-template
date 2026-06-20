@@ -69,7 +69,7 @@ def build_dataset(ws: str, name: str) -> None:
 
     if name == "synthetic":
         from tasks.utils.build_datasets import generate_synthetic
-        pairs = generate_synthetic(corpus_dataset="scifact", max_samples=500)
+        pairs = generate_synthetic(corpus_dataset="scifact", max_samples=500, num_negatives=7)
         with open(data_dir / "synthetic.jsonl", "w") as f:
             for p in pairs:
                 f.write(json.dumps(p) + "\n")

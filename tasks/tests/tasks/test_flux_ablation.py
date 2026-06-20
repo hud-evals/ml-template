@@ -34,8 +34,12 @@ gpu = pytest.mark.skipif(not _has_gpu(), reason="No GPU available")
 def _setup_workspace() -> str:
     import env
 
-    env._setup_workspace(staged_assets={"assets/cc12m": "data/cc12m"})
-    return env._workspace
+    env._setup_workspace(
+        f"python {env.SRC_DIR}/tasks/utils/setup_fixtures.py "
+        f"{env.WORKSPACE} --data-files pixparse/cc12m-wds "
+        "cc12m-train-0000.tar cc12m-train-0001.tar cc12m-train-0002.tar"
+    )
+    return env.WORKSPACE
 
 
 def _apply_timestep_bug(ws: str) -> None:

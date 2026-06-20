@@ -1,24 +1,4 @@
-"""ML training environment -- torchtitan experiments (HUD v6).
-
-Ported from the v5 SDK (tools + scenarios) to the v6 SDK (capabilities + task
-templates):
-
-* ``@env.scenario`` -> ``@env.template`` (generator body is unchanged:
-  ``yield prompt`` then ``yield <reward>``).
-* The hand-rolled coding tools + ``_SandboxedSession`` (which chmod-locked
-  ``/mcp_server`` and overrode shell builtins) are replaced by a single
-  ``env.workspace(...)`` capability: a bwrap-isolated SSH shell. The agent
-  harness brings its own bash/editor tools over that SSH channel. bwrap
-  isolation hides ``/mcp_server`` (source, graders, patches) for free -- only
-  the workspace directory is mounted inside the sandbox.
-* The GPU is exposed inside the sandbox by binding the real ``/dev`` with
-  bwrap's ``--dev-bind`` (registered below as the ``devbind`` mount kind);
-  the relocatable ``/opt/venv`` and CUDA user-space libs (``/usr``) are
-  mounted read-only so ``torch`` sees CUDA.
-* Graders run host-side (outside the sandbox) via ``hud.graders.BashGrader``
-  with ``cwd=WORKSPACE``; ``combine`` replaces ``Grade.gather`` and normalizes
-  the per-grader weights.
-"""
+"""HUD environment for ML training tasks built on torchtitan experiments."""
 
 import json
 import logging
@@ -56,7 +36,7 @@ def bash(cmd: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
 # Locations are overridable so the same env serves both the Modal/Docker image
 # (the defaults) and ad-hoc local runs.
 SRC_DIR = os.environ.get("HUD_SRC_DIR", "/mcp_server")
-WORKSPACE = os.environ.get("HUD_WORKSPACE", "/home/ubuntu/workspace")
+WORKSPACE = os.environ.get("HUD_WORKSPACE", "/workspace")
 STAGED_VENV = os.environ.get("HUD_VENV", "/opt/venv")
 
 if SRC_DIR not in sys.path:
@@ -68,9 +48,9 @@ AGENT_CONFIG = {
     "system_prompt": (
         "You are an expert ML engineer working with torchtitan.\n\n"
         "Environment:\n"
-        "  Workspace: /home/ubuntu/workspace (your shell starts here)\n"
-        "  Framework source: /home/ubuntu/workspace/torchtitan  (editable)\n"
-        "  Pre-staged data and assets: /home/ubuntu/workspace/data/, /home/ubuntu/workspace/assets/\n\n"
+        "  Workspace: /workspace (your shell starts here)\n"
+        "  Framework source: /workspace/torchtitan  (editable)\n"
+        "  Pre-staged data and assets: /workspace/data/, /workspace/assets/\n\n"
         "Running experiments:\n"
         "  Standard models train via run_train.sh (wraps torchrun -m torchtitan.train):\n"
         "    NGPU=1 MODULE=<module> CONFIG=<config> ./run_train.sh [extra CLI flags]\n"
@@ -88,10 +68,7 @@ AGENT_CONFIG = {
 # Workspace capability (bwrap-isolated SSH shell with GPU access)
 # ===========================================================================
 
-# bwrap's ``--bind /dev /dev`` exposes the device *nodes* but they cannot be
-# opened from inside a user namespace; ``--dev-bind`` is the variant that
-# grants device access. The v6 ``Workspace`` mount kinds don't expose it, so
-# register it here as ``devbind`` (kind -> (flag, try-flag, takes-src)).
+# Use a device bind for GPU access inside the isolated workspace.
 if "devbind" not in _ws_mod._MOUNT_FLAGS:
     _ws_mod._MOUNT_FLAGS["devbind"] = ("--dev-bind", "--dev-bind-try", True)
 
@@ -111,6 +88,11 @@ def _workspace_mounts() -> list[Mount]:
     if os.path.isdir(STAGED_VENV):
         mounts.append(Mount("ro", src=STAGED_VENV, dst=STAGED_VENV))
     return mounts
+
+
+def _gpu_present() -> bool:
+    """Whether this container appears to have NVIDIA device nodes attached."""
+    return any(Path(path).exists() for path in ("/dev/nvidiactl", "/dev/nvidia0"))
 
 
 # One workspace per env: an SSH shell the agent drives. ``guest_path=WORKSPACE``
@@ -134,29 +116,23 @@ workspace = env.workspace(
 
 @env.initialize
 async def _probe_bwrap() -> None:
-    """Disable bwrap isolation if it can't actually run here.
+    """Verify bwrap isolation can run before exposing the workspace.
 
     ``Workspace`` uses bwrap whenever the binary is on PATH, but some container
     runtimes ship it while forbidding the user namespace / device bind it needs
-    (every SSH command would then fail with no fallback). Probe the real
-    configuration once; on failure, drop to an unisolated host shell so the
-    environment still runs (the agent loses the ``/mcp_server`` boundary, which
-    is logged loudly).
+    (every SSH command would then fail). Probe the real workspace configuration
+    once; only allow an unisolated fallback for local/debug startup where there
+    are no GPU device nodes or where the override is explicit.
     """
     import asyncio
 
     if workspace._bwrap is None:
         return
-    argv = [
-        workspace._bwrap,
-        "--unshare-user-try",
-        "--unshare-pid",
-        "--dev-bind", "/dev", "/dev",
-        "--ro-bind", "/usr", "/usr",
-        "--proc", "/proc",
-        "--tmpfs", "/tmp",
-        "--", "bash", "-lc", "echo probe > /dev/null && nvidia-smi -L >/dev/null 2>&1 || true",
-    ]
+    os.makedirs(WORKSPACE, exist_ok=True)
+    argv = workspace.bwrap_argv(
+        ["bash", "-lc", "echo probe > /dev/null && nvidia-smi -L >/dev/null 2>&1 || true"],
+        cwd=WORKSPACE,
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -167,12 +143,25 @@ async def _probe_bwrap() -> None:
         if proc.returncode != 0:
             raise RuntimeError((stderr or b"").decode(errors="replace")[-500:] or "non-zero exit")
     except Exception as exc:  # noqa: BLE001 - any failure means bwrap is unusable
-        logger.warning(
-            "bwrap is present but unusable here (%s); the workspace will run "
-            "WITHOUT isolation (/mcp_server is NOT hidden from the agent).",
-            exc,
+        message = (
+            "bwrap is present but unusable here "
+            f"({exc}); refusing to serve an unisolated workspace in this configuration."
         )
-        workspace._bwrap = None
+        allow_unisolated = os.environ.get("HUD_ALLOW_UNISOLATED_WORKSPACE") == "1"
+        if allow_unisolated or not _gpu_present():
+            logger.warning(
+                "%s The workspace will run WITHOUT isolation. This is allowed "
+                "only because %s.",
+                message,
+                "HUD_ALLOW_UNISOLATED_WORKSPACE=1 is set"
+                if allow_unisolated
+                else "no NVIDIA device nodes are present, so this is deploy introspection/local no-GPU startup",
+            )
+            workspace._bwrap = None
+            return
+        raise RuntimeError(
+            f"{message} Set HUD_ALLOW_UNISOLATED_WORKSPACE=1 only for local debugging."
+        ) from exc
     else:
         logger.info("bwrap isolation active for the workspace shell.")
 
@@ -222,7 +211,7 @@ async def _grade(graders: list[dict[str, Any]]):
 
 
 def _clean_workspace() -> None:
-    """Empty the workspace, preserving the SSH daemon's ``.hud`` credentials."""
+    """Empty the workspace while preserving HUD runtime state."""
     os.makedirs(WORKSPACE, exist_ok=True)
     for entry in os.listdir(WORKSPACE):
         if entry == ".hud":

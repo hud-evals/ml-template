@@ -46,6 +46,7 @@ Sessionx.vim
 
 # env files
 .env
+.hud/
 
 # Claude Code local configuration
 CLAUDE.local.md

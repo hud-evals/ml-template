@@ -2,10 +2,8 @@
 
 HUD evaluation environment for ML training tasks. 10 tasks across embedding retrieval, VLM, Flux diffusion, and MoE language models. All run on 1x H100 80GB via [pytorch/torchtitan](https://github.com/pytorch/torchtitan).
 
-> **HUD v6.** This environment targets the v6 SDK (`hud-python @ v6`). Tasks are
-> served with `hud.eval` (`Task` + `LocalRuntime`/`Workspace`), and the env can
-> be driven three ways: locally, directly on Modal, or **dispatched through the
-> HUD platform** onto Modal (see [Running through the HUD platform](#running-through-the-hud-platform-modal-runtime)).
+> This environment can be driven three ways: locally, directly on Modal, or
+> through the **HUD platform** onto Modal (see [Running through the HUD platform](#running-through-the-hud-platform-modal-runtime)).
 
 ## Setup
 
@@ -17,6 +15,18 @@ uv sync
 ```
 
 ## Running Tasks
+
+These commands launch Modal directly from your local machine. The Modal functions
+in `modal_runner.py` request `gpu="H100"`.
+
+Modal containers do not inherit local shell exports, and this repo does not
+store your HUD API key. Before deploying or running directly on Modal,
+authenticate Modal and create a Modal secret with your HUD API key:
+
+```bash
+uv run modal setup
+uv run modal secret create hud-keys HUD_API_KEY=<your-hud-api-key>
+```
 
 ```bash
 # Deploy once
@@ -56,41 +66,32 @@ hud sync tasks <taskset-name>
 
 ## Running through the HUD platform (Modal runtime)
 
-The same env can be driven by the **HUD control plane** instead of being launched
-by hand — so a rollout is scheduled, dispatched, and logged on the platform just
-like an EC2 run, but executes on Modal.
+The same env can be driven by the **HUD platform** instead of being launched by
+hand, so a run is queued and logged on HUD while executing on Modal.
 
-This is the `run_rollout_dispatched` function in `modal_runner.py`. It is the
-Modal twin of an EC2 `hud-daemon` run:
+Use `platform_runner.py` for this path. It deploys the environment for hosted
+Modal execution and submits runs with the GPU settings this template needs.
 
-- The control plane provisions the rollout onto Modal (a registry whose
-  `instance_config.sandbox_provider = "modal"` points at this app + function).
-- It hands over the **same `runner_config`** the EC2 daemon receives, plus the
-  platform identities to report back to (`api_url` / `api_key` / `gateway_url` /
-  `telemetry_url`).
-- The function serves `env.py` in‑process with `LocalRuntime` (this container
-  *is* the env image), runs the agent, and reports the trace
-  (`/enter … /exit`) under the platform‑assigned `trace_id`.
-
-```
-HUD platform  ──(provision)──►  run_rollout_dispatched (Modal, H100)
-                                   • Task(env, id, args) + agent from runner_config
-                                   • rollout(..., runtime=LocalRuntime("env.py"))
-                                   • reports trace status + reward back to the platform
-```
-
-Deploy it the same way as the rest of the app:
+Deploy the Modal-backed HUD image and sync tasks:
 
 ```bash
-uv run modal deploy modal_runner.py   # publishes run_rollout_dispatched alongside run_agent/run_eval
+uv run python platform_runner.py deploy
+uv run hud sync tasks <taskset-name> taskset.py
 ```
 
-The control‑plane side of this wiring (the `sandbox_provider="modal"` dispatch
-seam) lives in the `hud-monorepo` control plane.
+Submit tasks through HUD hosted Modal:
+
+```bash
+uv run python platform_runner.py run --task emb_debug_multi --model claude-opus-4-6
+uv run python platform_runner.py run --all --group 4 --max-concurrent 4
+```
+
+Set `HUD_MODAL_GPU_TYPE` or pass `--gpu-type` if a run needs a different
+Modal GPU type. The default is `H100`.
 
 ## Architecture
 
-Private [pytorch/torchtitan](https://github.com/pytorch/torchtitan) mirror with HUD evaluation layer on top.
+[pytorch/torchtitan](https://github.com/pytorch/torchtitan) fork with HUD evaluation layer on top.
 
 ```
 env.py                    # Scenarios, grading harness, tool registration

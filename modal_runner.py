@@ -1,4 +1,4 @@
-"""Modal runner for agent tasks and GPU tests (HUD v6).
+"""Modal runner for agent tasks and GPU tests.
 
 Deploy once, then spawn isolated agent runs:
 
@@ -22,10 +22,7 @@ Setup:
     modal setup
     modal secret create hud-keys HUD_API_KEY=<key>
 
-Each container serves the v6 Environment in-process with ``LocalRuntime`` (the
-same ``python -m hud.environment.server`` entry point the image CMD runs) and
-drives it with a gateway-routed agent. The env's ``env.workspace(...)``
-capability gives the agent a bwrap-isolated SSH shell with the H100 exposed.
+Each container runs one task against the HUD environment with access to an H100.
 """
 
 import contextlib
@@ -42,22 +39,22 @@ image = (
         "Dockerfile.hud",
         build_args={"HUD_RUNTIME": "0"},
     )
-    # anthropic ships as a core dependency of hud-python v6, so the image's
+    # anthropic ships as a core dependency of hud-python, so the image's
     # `uv sync` installs it; this is a defensive no-op if resolution skipped it.
     .run_commands("uv pip install --python /opt/venv/bin/python 'anthropic>=0.40'")
     .add_local_dir("tasks", remote_path="/mcp_server/tasks")
 )
 
 SRC = "/mcp_server"
-WS = "/home/ubuntu/workspace"
+WS = "/workspace"
 TASK_DIR = pathlib.Path(__file__).parent / "tasks"
 
 
 def _provider_for(model: str) -> str | None:
-    """Map a concrete model id to its HUD gateway provider (an ``AgentType``).
+    """Infer the model provider when possible.
 
     Returns ``None`` if the provider can't be inferred, in which case the caller
-    falls back to ``create_agent``'s gateway ``/models`` lookup.
+    falls back to the SDK's default agent construction.
     """
     m = model.lower()
     if m.startswith(("claude", "anthropic")):
@@ -70,12 +67,10 @@ def _provider_for(model: str) -> str | None:
 
 
 def _make_agent(model: str, system_prompt: str, max_steps: int):
-    """Build a gateway-routed agent for ``model``.
+    """Build an agent for ``model``.
 
-    Constructs the agent directly from its ``AgentType`` when the provider is
-    known, which routes inference for the exact ``model`` id while skipping the
-    platform-scoped gateway ``/models`` lookup. Falls back to ``create_agent``
-    (registry resolution) for providers we can't infer.
+    Constructs the agent directly when the provider is known, and falls back to
+    the SDK helper for providers we cannot infer.
     """
     from hud.agents import create_agent
 
@@ -108,7 +103,7 @@ def _deployed_function(name: str):
 
 
 def _load_task(task_name: str):
-    """Import tasks/<task_name>/task.py and return its built v6 Task."""
+    """Import tasks/<task_name>/task.py and return its built Task."""
     import importlib
     import sys
 
@@ -120,11 +115,8 @@ def _load_task(task_name: str):
         sys.path.pop(0)
 
 
-# This HUD account lives on the production control plane, but the v6 SDK
-# defaults to the beta endpoints (api/inference/telemetry.beta.hud.ai), which
-# reject a production key with 401. Point every HUD URL at production; these are
-# inherited by the LocalRuntime env-server child. ``setdefault`` lets the Modal
-# secret / environment override them if ever needed.
+# Use production HUD endpoints by default. ``setdefault`` lets the Modal secret
+# or environment override them if ever needed.
 HUD_PROD_URLS = {
     "HUD_API_URL": "https://api.hud.ai",
     "HUD_GATEWAY_URL": "https://inference.hud.ai",
@@ -146,8 +138,7 @@ async def run_agent(
 ) -> float:
     """Run an agent against a task in an isolated container; return the reward."""
     os.environ.setdefault("MCP_TESTING_MODE", "1")
-    # Must run before the first ``hud`` import so the settings singleton reads
-    # the production endpoints.
+    # Must run before the first ``hud`` import so production endpoints are used.
     for key, value in HUD_PROD_URLS.items():
         os.environ.setdefault(key, value)
 
@@ -176,14 +167,11 @@ async def run_agent(
 
 
 @contextlib.contextmanager
-def _scoped_v6_settings(*, api_url: str, api_key: str, gateway_url: str, telemetry_url: str):
-    """Bind hud-python's settings singleton to a platform for one rollout.
+def _scoped_hud_settings(*, api_url: str, api_key: str, gateway_url: str, telemetry_url: str):
+    """Apply HUD endpoint settings for one run.
 
-    The Modal analog of hud-daemon's ``runner_v6._scoped_v6_settings``: the
-    rollout atom's reporting posts to ``hud_api_url``, spans export to
-    ``hud_telemetry_url``, and gateway agents build clients against
-    ``hud_gateway_url`` with ``api_key``. All must point at the dispatching
-    control plane rather than the SDK / prod defaults.
+    These values come from the HUD launch request so the Modal run reports to
+    the right HUD environment.
     """
     from hud.settings import settings as sdk_settings
 
@@ -195,7 +183,6 @@ def _scoped_v6_settings(*, api_url: str, api_key: str, gateway_url: str, telemet
         sdk_settings.telemetry_enabled,
     )
     sdk_settings.api_key = api_key
-    # PlatformClient prepends its own /v2, so this is the bare origin.
     sdk_settings.hud_api_url = api_url.rstrip("/")
     sdk_settings.hud_gateway_url = gateway_url.rstrip("/")
     sdk_settings.hud_telemetry_url = telemetry_url.rstrip("/")
@@ -213,12 +200,10 @@ def _scoped_v6_settings(*, api_url: str, api_key: str, gateway_url: str, telemet
 
 
 def _build_agent_from_spec(agent_spec: dict):
-    """Rebuild the gateway agent the platform submission serialized.
+    """Rebuild the agent serialized by the HUD submission.
 
-    Mirrors ``runner_v6._build_agent``: ``agent_spec`` is the SDK's
-    ``ToolAgent.hosted_spec`` (a ``type`` from the v6 ``AgentType`` vocabulary
-    plus a serialized ``AgentConfig``). The provider client resolves through the
-    HUD gateway via the settings bound by :func:`_scoped_v6_settings`.
+    ``agent_spec`` contains the agent type and config needed to recreate the
+    submitted agent inside the Modal container.
     """
     from hud.types import AgentType
 
@@ -227,11 +212,35 @@ def _build_agent_from_spec(agent_spec: dict):
         agent_type = AgentType(raw_type)
     except ValueError:
         raise RuntimeError(
-            f"Unsupported v6 agent type: {raw_type!r}. "
+            f"Unsupported agent type: {raw_type!r}. "
             f"Expected one of: {', '.join(at.value for at in AgentType)}."
         ) from None
     config = agent_type.config_cls.model_validate(agent_spec.get("config") or {})
     return agent_type.cls(config)
+
+
+def _task_from_runner_config(runner_config: dict):
+    """Build a Task from the HUD run request."""
+    from hud.eval.task import Task
+
+    task_block = runner_config.get("task") or {}
+    task_id = task_block.get("id")
+    env_name = task_block.get("env") or runner_config.get("env_name")
+    if not task_id or not env_name:
+        raise RuntimeError(
+            "HUD run request has no task reference."
+        )
+
+    args = task_block.get("args")
+    if args is None:
+        args = (runner_config.get("scenario") or {}).get("args") or {}
+
+    return Task(
+        env=env_name,
+        id=task_id,
+        args=args,
+        slug=task_block.get("slug") or runner_config.get("slug"),
+    )
 
 
 async def _run_dispatched_rollout(
@@ -242,46 +251,25 @@ async def _run_dispatched_rollout(
     gateway_url: str,
     telemetry_url: str,
 ) -> dict:
-    """Drive one platform-dispatched v6 rollout, serving the env locally.
-
-    The Modal-side twin of ``hud-daemon.runner_v6.run_rollout_v6``: same
-    runner_config contract and same trace-exit result shape, but the env is
-    served in-process with ``LocalRuntime`` (this container *is* the env image)
-    instead of attaching to a separately-booted container channel. Factored out
-    of the Modal entrypoint so it can be unit-tested without Modal. Like the
-    atom, it does not raise for in-run failures — the error travels on the
-    result.
-    """
+    """Drive one HUD-submitted run inside Modal."""
     from hud.eval.run import rollout
     from hud.eval.runtime import LocalRuntime
-    from hud.eval.task import Task
     from hud.telemetry.exporter import flush as flush_telemetry
 
-    task_block = runner_config.get("task") or {}
-    task_id = task_block.get("id")
-    env_name = runner_config.get("env_name")
-    if not task_id or not env_name:
-        raise RuntimeError(
-            "Runner config has no v6 task reference (task.id + env_name) — "
-            "this trace was not created by a v6 submission."
-        )
     job_id = runner_config.get("job_id")
     if not job_id:
-        raise RuntimeError("Runner config has no job_id")
+        raise RuntimeError("HUD run request has no job id.")
     group_id = runner_config.get("group_id")
 
-    scenario_info = runner_config.get("scenario") or {}
-    args = scenario_info.get("args") or {}
     agent_spec = runner_config.get("agent_config")
     if not agent_spec:
         raise RuntimeError(
-            "Runner config has no agent_config — this trace was not created by a "
-            "v6 submission (hosted agent spec missing)."
+            "HUD run request has no agent configuration."
         )
 
-    task = Task(env=env_name, id=task_id, args=args)
+    task = _task_from_runner_config(runner_config)
 
-    with _scoped_v6_settings(
+    with _scoped_hud_settings(
         api_url=api_url,
         api_key=api_key,
         gateway_url=gateway_url,
@@ -325,19 +313,13 @@ async def run_rollout_dispatched(
     gateway_url: str,
     telemetry_url: str,
 ) -> dict:
-    """Platform-dispatched v6 rollout — the Modal analog of an EC2 hud-daemon run.
+    """HUD-submitted run executing on Modal.
 
-    The control plane's provision worker spawns this in place of leasing an EC2
-    instance when a registry sets ``sandbox_provider="modal"``. It receives the
-    same ``runner_config`` ``get_config`` serves the daemon, plus the platform
-    identities to report back to (``api_url`` / ``api_key`` / ``gateway_url`` /
-    ``telemetry_url`` — the Modal equivalents of the values baked into EC2
-    userdata). The trace it reports under is the platform-assigned id the engine
-    is polling, so the run surfaces on the platform exactly as an EC2 run would.
+    HUD invokes this function with the task request and reporting
+    endpoints for the run. The trace it reports under is the HUD-assigned id,
+    so the run appears on HUD like any other platform run.
     """
     os.environ.setdefault("MCP_TESTING_MODE", "1")
-    # The LocalRuntime env-server child inherits these; the parent additionally
-    # binds the settings singleton in _scoped_v6_settings below.
     os.environ["HUD_API_URL"] = api_url.rstrip("/")
     os.environ["HUD_GATEWAY_URL"] = gateway_url.rstrip("/")
     os.environ["HUD_TELEMETRY_URL"] = telemetry_url.rstrip("/")

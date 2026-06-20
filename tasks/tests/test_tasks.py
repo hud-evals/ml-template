@@ -401,9 +401,9 @@ class TestParityTasks:
         assert reference_spec, f"{slug}: parity task should declare reference_spec"
 
 
-_TRAIN_AUDIT_FIXED = {"prompt", "graders", "staged_assets", "contamination"}
+_TRAIN_AUDIT_FIXED = {"prompt", "graders", "setup_command", "contamination"}
 _TRAIN_CONTAMINATE_FIXED = {"workspace", "mutation"}
-_EVAL_AUDIT_FIXED = {"prompt", "graders", "staged_assets", "eval_mutation"}
+_EVAL_AUDIT_FIXED = {"prompt", "graders", "setup_command", "eval_mutation"}
 _EVAL_CONTAMINATE_FIXED = {"workspace", "mutation"}
 
 
@@ -503,6 +503,22 @@ class TestDockerfileCompleteness:
                 f"Dockerfile copies './{src}' but it doesn't exist at {path}"
             )
 
+    def test_tasks_copied_as_package(self):
+        """Template Dockerfile should not hardcode individual task packages."""
+        import re
+
+        dockerfile = (REPO_ROOT / "Dockerfile.hud").read_text()
+        task_copies = [
+            match.group(1)
+            for match in re.finditer(r"COPY\s+\./(tasks/?\S*)", dockerfile)
+        ]
+
+        assert task_copies, "Dockerfile must copy the tasks package"
+        assert task_copies == ["tasks/"], (
+            "Dockerfile should copy './tasks/' once, not hardcode individual "
+            f"task subdirectories: {task_copies}"
+        )
+
 
 class TestSourceFilesClean:
     """Verify source files haven't been left in a patched state."""
@@ -547,7 +563,8 @@ class TestScenarioSignatures:
         from env import train_to_target
 
         params = inspect.signature(train_to_target).parameters
-        assert list(params) == ["prompt", "graders", "staged_assets"]
+        assert list(params) == ["prompt", "graders", "setup_command"]
+        assert params["setup_command"].default is None
 
     def test_optimize_under_constraints_signature(self):
         from env import optimize_under_constraints
@@ -555,7 +572,7 @@ class TestScenarioSignatures:
         params = inspect.signature(optimize_under_constraints).parameters
         assert "constraints" in params
         assert params["constraints"].default is inspect._empty
-        assert params["staged_assets"].default is None
+        assert params["setup_command"].default is None
 
     def test_adapt_without_forgetting_signature(self):
         from env import adapt_without_forgetting
@@ -565,7 +582,7 @@ class TestScenarioSignatures:
             assert required in params
             assert params[required].default is inspect._empty
         assert params["forbidden_train_files"].default is None
-        assert params["staged_assets"].default is None
+        assert params["setup_command"].default is None
 
     def test_targeted_failure_recovery_signature(self):
         from env import targeted_failure_recovery
@@ -574,7 +591,6 @@ class TestScenarioSignatures:
         assert "failure_manifest" in params
         assert params["failure_manifest"].default is None
         assert params["setup_command"].default is None
-        assert params["staged_assets"].default is None
 
     def test_restore_reference_parity_signature(self):
         from env import restore_reference_parity
@@ -583,4 +599,4 @@ class TestScenarioSignatures:
         assert "reference_spec" in params
         assert params["reference_spec"].default is inspect._empty
         assert params["patches"].default is None
-        assert params["staged_assets"].default is None
+        assert params["setup_command"].default is None
