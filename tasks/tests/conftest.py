@@ -48,11 +48,16 @@ def apply_task_patches(ws: str, task_name: str) -> None:
     task_dir = REPO_ROOT / "tasks" / task_name
     for patch_file in sorted(os.listdir(task_dir)):
         if patch_file.endswith(".patch"):
-            result = subprocess.run(
-                ["patch", "-p1", "-i", str(task_dir / patch_file)],
-                cwd=ws, capture_output=True, text=True,
-            )
-            assert result.returncode == 0, f"patch failed: {result.stderr}"
+            apply_task_patch(ws, task_name, patch_file)
+
+
+def apply_task_patch(ws: str, task_name: str, patch_file: str) -> None:
+    task_dir = REPO_ROOT / "tasks" / task_name
+    result = subprocess.run(
+        ["patch", "-p1", "-i", str(task_dir / patch_file)],
+        cwd=ws, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"patch failed: {result.stderr}"
 
 
 def make_training_data(ws: str, filename: str = "scifact.jsonl", n: int = 50) -> str:

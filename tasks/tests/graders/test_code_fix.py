@@ -2,6 +2,8 @@
 
 import subprocess
 
+import pytest
+
 from ..conftest import REPO_ROOT, apply_task_patches, copy_source_file, make_workspace, run_check
 
 
@@ -19,7 +21,7 @@ class TestCodeFixChecks:
     def test_buggy_loss_unfixed_fails(self, tmp_path):
         ws = make_workspace(str(tmp_path))
         copy_source_file(ws, "torchtitan/experiments/embedding/losses.py")
-        apply_task_patches(ws, "emb_debug_loss")
+        self._apply_patch_file(ws, "emb_debug_multi", "00_buggy_loss.patch")
         r = run_check("check_code_fix", ["buggy_loss", ws])
         assert r.returncode == 1, f"Should fail on unfixed code: {r.stdout}"
 
@@ -32,7 +34,7 @@ class TestCodeFixChecks:
     def test_bad_pooling_unfixed_fails(self, tmp_path):
         ws = make_workspace(str(tmp_path))
         copy_source_file(ws, "torchtitan/experiments/embedding/embedding_trainer.py")
-        apply_task_patches(ws, "emb_debug_pooling")
+        self._apply_patch_file(ws, "emb_debug_multi", "10_bad_pooling.patch")
         r = run_check("check_code_fix", ["bad_pooling", ws])
         assert r.returncode == 1, f"Should fail on unfixed code: {r.stdout}"
 
@@ -55,6 +57,7 @@ class TestCodeFixChecks:
         r = run_check("check_code_fix", ["buggy_projector", ws])
         assert r.returncode == 0, f"Should pass on original code: {r.stdout}"
 
+    @pytest.mark.skip(reason="vlm_debug_labels variant is not part of the current task set")
     def test_bad_label_mask_unfixed_fails(self, tmp_path):
         ws = make_workspace(str(tmp_path))
         copy_source_file(ws, "torchtitan/experiments/vlm/datasets/mm_datasets.py")
@@ -62,12 +65,14 @@ class TestCodeFixChecks:
         r = run_check("check_code_fix", ["bad_label_mask", ws])
         assert r.returncode == 1, f"Should fail on unfixed code: {r.stdout}"
 
+    @pytest.mark.skip(reason="vlm_debug_labels variant is not part of the current task set")
     def test_bad_label_mask_fixed_passes(self, tmp_path):
         ws = make_workspace(str(tmp_path))
         copy_source_file(ws, "torchtitan/experiments/vlm/datasets/mm_datasets.py")
         r = run_check("check_code_fix", ["bad_label_mask", ws])
         assert r.returncode == 0, f"Should pass on original code: {r.stdout}"
 
+    @pytest.mark.skip(reason="flux_debug_attn variant is not part of the current task set")
     def test_flux_causal_attn_unfixed_fails(self, tmp_path):
         ws = make_workspace(str(tmp_path))
         copy_source_file(ws, "torchtitan/models/flux/model/layers.py")
@@ -75,6 +80,7 @@ class TestCodeFixChecks:
         r = run_check("check_code_fix", ["flux_causal_attn", ws])
         assert r.returncode == 1, f"Should fail on unfixed code: {r.stdout}"
 
+    @pytest.mark.skip(reason="flux_debug_attn variant is not part of the current task set")
     def test_flux_causal_attn_fixed_passes(self, tmp_path):
         ws = make_workspace(str(tmp_path))
         copy_source_file(ws, "torchtitan/models/flux/model/layers.py")
@@ -82,6 +88,7 @@ class TestCodeFixChecks:
         r = run_check("check_code_fix", ["flux_causal_attn", ws])
         assert r.returncode == 0, f"Should pass on baseline-fixed code: {r.stdout}"
 
+    @pytest.mark.skip(reason="flux_debug_guidance variant is not part of the current task set")
     def test_flux_cfg_dropout_unfixed_fails(self, tmp_path):
         ws = make_workspace(str(tmp_path))
         copy_source_file(ws, "torchtitan/models/flux/model/layers.py")

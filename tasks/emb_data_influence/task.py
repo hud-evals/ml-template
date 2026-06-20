@@ -1,7 +1,7 @@
 from env import WORKSPACE as W, targeted_failure_recovery
 from tasks.graders import grader
 
-task = targeted_failure_recovery.task(
+task = targeted_failure_recovery(
     prompt=(
         "A model was trained on data/scifact.jsonl and a checkpoint is at "
         "checkpoints/checkpoint_61/. The model performs reasonably overall but fails "
@@ -50,7 +50,7 @@ task = targeted_failure_recovery.task(
         ],
     },
     setup_command=(
-        f"python /mcp_server/setup/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact && "
+        f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact && "
         f"python /mcp_server/tasks/emb_data_influence/setup.py {W}"
     ),
 )

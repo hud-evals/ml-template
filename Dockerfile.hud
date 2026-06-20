@@ -5,6 +5,7 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04 AS setup
 RUN apt-get update -y \
   && apt-get install -y --no-install-recommends \
   bash \
+  bubblewrap \
   build-essential \
   ca-certificates \
   curl \
@@ -34,15 +35,17 @@ USER root
 
 RUN pip install uv --break-system-packages
 
-COPY ./pyproject.toml /mcp_server/pyproject.toml
+COPY ./pyproject.toml ./uv.lock /mcp_server/
 WORKDIR /mcp_server
 
 ENV RUST_LOG=warn
 RUN uv venv --relocatable /opt/venv && \
-    UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --no-install-project
+    UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-install-project
 
-ENV PYTHONPATH=/mcp_server:/home/ubuntu/workspace
-ENV PATH=/home/ubuntu/workspace/.venv/bin:/opt/venv/bin:/home/ubuntu/.local/bin:$PATH
+RUN mkdir -p /workspace && chmod 0777 /workspace
+
+ENV PYTHONPATH=/mcp_server:/workspace
+ENV PATH=/workspace/.venv/bin:/opt/venv/bin:/home/ubuntu/.local/bin:$PATH
 ENV HF_HOME=/home/ubuntu/.cache/huggingface
 
 # Source code only — assets are downloaded at scenario setup time.
@@ -51,12 +54,11 @@ COPY ./run_train.sh /mcp_server/run_train.sh
 COPY ./torchtitan/ /mcp_server/torchtitan/
 COPY ./tests/ /mcp_server/tests/
 COPY ./scripts/ /mcp_server/scripts/
-RUN mkdir -p /mcp_server/tasks && touch /mcp_server/tasks/__init__.py
-COPY ./tasks/mutations/ /mcp_server/tasks/mutations/
-COPY ./tasks/utils/ /mcp_server/tasks/utils/
+COPY ./tasks/ /mcp_server/tasks/
 
 RUN chmod 700 /mcp_server
 
-ARG HUD_RUNTIME="1"
-ENV _HUD_DEV_CHILD=${HUD_RUNTIME}
-CMD ["hud", "dev", "env:env", "--port", "8080"]
+# The Modal runner starts the environment itself; this keeps the image directly
+# servable via `docker run`.
+CMD ["/opt/venv/bin/python", "-m", "hud.environment.server", "/mcp_server/env.py", \
+     "--env", "ml-template-1", "--host", "0.0.0.0", "--port", "8765"]

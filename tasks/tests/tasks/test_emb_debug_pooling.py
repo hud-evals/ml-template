@@ -1,8 +1,8 @@
-"""Tests for the emb_debug_pooling task: bad pooling strategy patch."""
+"""Tests for the emb_debug_multi task: bad pooling strategy patch."""
 
 import os
 
-from ..conftest import apply_task_patches, copy_source_file, make_workspace
+from ..conftest import apply_task_patch, copy_source_file, make_workspace
 
 
 class TestEmbDebugPooling:
@@ -12,7 +12,8 @@ class TestEmbDebugPooling:
         original = open(os.path.join(ws, "torchtitan/experiments/embedding/embedding_trainer.py")).read()
         assert "seq_lengths = attention_mask.sum" in original
 
-        apply_task_patches(ws, "emb_debug_pooling")
+        apply_task_patch(ws, "emb_debug_multi", "10_bad_pooling.patch")
 
         mutated = open(os.path.join(ws, "torchtitan/experiments/embedding/embedding_trainer.py")).read()
-        assert "last_hidden = (hidden * attention_mask.unsqueeze(-1)).sum(dim=1) / attention_mask.sum(dim=-1, keepdim=True)" in mutated
+        assert "last_hidden = hidden[:, 0, :]" in mutated
+        assert "last_hidden = hidden[batch_indices, seq_lengths]" not in mutated

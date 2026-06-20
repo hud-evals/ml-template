@@ -2,9 +2,12 @@
 
 import os
 
+import pytest
+
 from ..conftest import apply_task_patches, copy_source_file, make_workspace
 
 
+@pytest.mark.skip(reason="vlm_debug_labels variant is not part of the current task set")
 class TestVlmDebugLabels:
     def test_patch_inverts_label_mask(self, tmp_path):
         ws = make_workspace(str(tmp_path))

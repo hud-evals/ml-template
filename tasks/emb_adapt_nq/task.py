@@ -1,7 +1,7 @@
 from env import WORKSPACE as W, adapt_without_forgetting
 from tasks.graders import grader
 
-task = adapt_without_forgetting.task(
+task = adapt_without_forgetting(
     prompt=(
         "You have a model at checkpoints/scifact_base/ that performs well on "
         "SciFact retrieval. Adapt it to also handle Natural Questions (NQ).\n\n"
@@ -26,6 +26,6 @@ task = adapt_without_forgetting.task(
     adapt_train_files=["data/nq.jsonl"],
     retain_eval_files=["data/val.jsonl", "data/nq_val.jsonl"],
     forbidden_train_files=["data/scifact.jsonl"],
-    setup_command=f"python /mcp_server/setup/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact nq --checkpoints scifact_base",
+    setup_command=f"python /mcp_server/tasks/utils/setup_fixtures.py {W} --models Qwen/Qwen3-0.6B --datasets scifact nq --checkpoints scifact_base",
 )
 task.slug = "emb_adapt_nq"

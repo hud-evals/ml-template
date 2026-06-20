@@ -39,7 +39,7 @@ def _setup_workspace() -> str:
     import env
 
     env._setup_workspace()
-    return env._workspace
+    return env.WORKSPACE
 
 
 def _apply_patch(ws: str, task_name: str, patch_filename: str) -> None:

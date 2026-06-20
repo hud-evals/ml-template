@@ -2,7 +2,7 @@ from env import WORKSPACE as W, repair_degraded_recipe
 from tasks.graders import grader
 from tasks.utils import load_patches
 
-task = repair_degraded_recipe.task(
+task = repair_degraded_recipe(
     prompt=(
         "Train the DeepSeek V3 debugmodel -- a Mixture-of-Experts language model.\n\n"
         "Your score depends on both validation loss and expert utilization balance."
