@@ -17,7 +17,7 @@ dependencies = [
     "tensorboard",
     "einops",
     # Embedding experiment
-    "transformers>=4.40.0,<5",
+    "transformers>=5.5.0,<6",
     "mteb>=1.12,<2",
     # Dev
     "pytest",
