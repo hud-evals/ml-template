@@ -39,7 +39,7 @@ image = (
         "Dockerfile.hud",
         build_args={"HUD_RUNTIME": "0"},
     )
-    # anthropic ships as a core dependency of hud-python, so the image's
+    # anthropic ships as a core dependency of hud, so the image's
     # `uv sync` installs it; this is a defensive no-op if resolution skipped it.
     .run_commands("uv pip install --python /opt/venv/bin/python 'anthropic>=0.40'")
     .add_local_dir("tasks", remote_path="/mcp_server/tasks")
