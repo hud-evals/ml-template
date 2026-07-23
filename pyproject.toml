@@ -8,7 +8,7 @@ dependencies = [
     # HUD
     "hud",
     # torchtitan core
-    "torch>=2.2.0",
+    "torch>=2.13.0",
     "torchdata>=0.8.0",
     "datasets>=2.14,<3.0",
     "tokenizers>=0.15.0",
